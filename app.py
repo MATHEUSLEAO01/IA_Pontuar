@@ -6,28 +6,25 @@ import pytesseract
 import re
 import pandas as pd
 
-# --- Função de pré-processamento de imagem com OpenCV ---
-def pre_processar_imagem_cv(img_file):
+# --- Função de pré-processamento da imagem com OpenCV ---
+def pre_processar_imagem(img_file):
     img = np.array(Image.open(img_file).convert("RGB"))
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    blur = cv2.medianBlur(gray, 3)  # remover ruído
-    _, thresh = cv2.threshold(blur, 140, 255, cv2.THRESH_BINARY)  # binarização
+    gray = cv2.equalizeHist(gray)  # aumenta contraste
+    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                   cv2.THRESH_BINARY, 15, 10)
     kernel = np.ones((2,2), np.uint8)
-    dilated = cv2.dilate(thresh, kernel, iterations=1)  # unir caracteres quebrados
+    dilated = cv2.dilate(thresh, kernel, iterations=1)
     return Image.fromarray(dilated)
 
-# --- Função para extrair valores monetários de forma limpa ---
-def extrair_valores_limpo(texto):
-    texto = texto.replace("\n", " ").replace(" ", "")
-    # junta fragmentos como "2, 57" ou "2 ,57"
+# --- Função para extrair valores do texto OCR ---
+def extrair_valores(texto):
+    # junta fragmentos quebrados tipo "2 ,57" → "2,57"
     texto = re.sub(r"(\d+)\s*,\s*(\d{2})", r"\1,\2", texto)
-    # captura valores monetários
-    fragmentos = re.findall(r"R?\$?(\d+,\d{2})", texto)
-    valores = []
-    for f in fragmentos:
-        v = f"R$ " + f
-        if v not in valores:
-            valores.append(v)
+    # regex para capturar valores monetários
+    valores = re.findall(r'R?\$?\d+,\d{2}', texto)
+    # adiciona R$ e remove duplicados
+    valores = [f"R$ {v.replace('R$', '')}" for v in set(valores)]
     return valores
 
 # --- Histórico de perguntas (máx. 3) ---
@@ -41,12 +38,8 @@ def adicionar_historico(pergunta, resposta):
 
 # --- Layout Streamlit ---
 st.title("📊 IA Leitora de Planilhas e Imagens Avançada")
-
-uploaded_file = st.file_uploader(
-    "📂 Envie planilha, PDF ou imagem",
-    type=["xlsx", "csv", "png", "jpg", "jpeg", "pdf"]
-)
-
+uploaded_file = st.file_uploader("📂 Envie planilha, PDF ou imagem", 
+                                 type=["xlsx", "csv", "png", "jpg", "jpeg", "pdf"])
 pergunta = st.text_input("💬 Faça sua pergunta (ex: valor do frango inteiro)")
 
 if st.button("🔍 Consultar") and uploaded_file and pergunta:
@@ -54,9 +47,11 @@ if st.button("🔍 Consultar") and uploaded_file and pergunta:
     
     # --- Se for imagem ---
     if uploaded_file.type in ["image/png", "image/jpeg", "image/jpg"]:
-        img = pre_processar_imagem_cv(uploaded_file)
-        texto = pytesseract.image_to_string(img, lang="por")
-        valores = extrair_valores_limpo(texto)
+        img = pre_processar_imagem(uploaded_file)
+        # OCR com whitelist e PSM 6
+        custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789,R$.,'
+        texto = pytesseract.image_to_string(img, lang="por", config=custom_config)
+        valores = extrair_valores(texto)
         if valores:
             resposta = f"💰 Valores encontrados: {', '.join(valores)}"
         else:
@@ -78,9 +73,10 @@ if st.button("🔍 Consultar") and uploaded_file and pergunta:
                 valores = []
                 for col in df_filtrado.columns:
                     for val in df_filtrado[col]:
-                        val_str = str(val).replace(",", ".")
-                        if re.match(r"\d+(\.\d+)?", val_str):
-                            valores.append(f"R$ {float(val_str):.2f}".replace(".", ","))
+                        val_str = str(val)
+                        if re.match(r"\d+([.,]\d+)?", val_str):
+                            val_str = val_str.replace(".", ",")
+                            valores.append(f"R$ {float(val_str.replace(',', '.')):.2f}".replace(".", ","))
                 resposta = f"💰 Valores encontrados: {', '.join(valores)}"
             else:
                 resposta = "❌ Nenhum valor encontrado para este item."
