@@ -48,10 +48,7 @@ def extrair_texto(img_file):
             image = vision.Image(content=image_bytes)
             response = client.text_detection(image=image)
             texts = response.text_annotations
-            if texts:
-                texto = texts[0].description
-            else:
-                texto = ""
+            texto = texts[0].description if texts else ""
         else:
             img_cv = pre_processar_imagem(img_file)
             texto = pytesseract.image_to_string(img_cv, lang="por")
@@ -65,19 +62,17 @@ def extrair_texto(img_file):
         return ""
 
 # ============================================================
-# 💰 Função para extrair valores monetários
+# 💰 Função para extrair valores monetários próximos de uma palavra
 # ============================================================
-def extrair_valores(texto):
-    valores = re.findall(
-        r'R\$\s?\d{1,3}(?:\.\d{3})*,\d{2}|\d{1,3}(?:\.\d{3})*,\d{2}',
-        texto
-    )
-    valores = [v.replace(" ", "").replace("R$", "R$ ") for v in valores]
-    final = []
-    for v in valores:
-        if not final or v != final[-1]:
-            final.append(v)
-    return final
+def extrair_valor_por_item(texto, item):
+    linhas = re.split(r'\.|\n', texto)
+    valores_encontrados = []
+    for linha in linhas:
+        if item.lower() in linha.lower():
+            valores = re.findall(r'R?\$?\s*\d+[.,]\d+', linha)
+            valores_encontrados.extend([v.replace(" ", "").replace("R$", "R$ ") for v in valores])
+    # Remover duplicados
+    return list(dict.fromkeys(valores_encontrados))
 
 # ============================================================
 # 📜 Histórico de perguntas e respostas (máx. 3)
@@ -87,7 +82,6 @@ if "historico" not in st.session_state:
 
 def adicionar_historico(pergunta, resposta):
     st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta})
-    # Mantém apenas as últimas 3 perguntas
     if len(st.session_state["historico"]) > 3:
         st.session_state["historico"] = st.session_state["historico"][-3:]
 
@@ -99,19 +93,19 @@ uploaded_file = st.file_uploader(
     "📂 Envie planilha, PDF ou imagem",
     type=["xlsx", "csv", "png", "jpg", "jpeg", "pdf"]
 )
-pergunta = st.text_input("💬 Faça sua pergunta (ex: valor do frango inteiro em GO)")
+item = st.text_input("💬 Digite o item que deseja consultar (ex: Fígado)")
 
-if st.button("🔍 Consultar") and uploaded_file and pergunta:
+if st.button("🔍 Consultar") and uploaded_file and item:
     resposta = ""
 
     # === Se for imagem ===
     if uploaded_file.type in ["image/png", "image/jpeg", "image/jpg"]:
         texto = extrair_texto(uploaded_file)
-        valores = extrair_valores(texto)
+        valores = extrair_valor_por_item(texto, item)
         if valores:
-            resposta = f"💰 Valores encontrados: {', '.join(valores)}"
+            resposta = f"💰 Valores encontrados para '{item}': {', '.join(valores)}"
         else:
-            resposta = "❌ Nenhum valor encontrado para este item."
+            resposta = f"❌ Nenhum valor encontrado para '{item}'."
 
     # === Se for planilha ===
     elif uploaded_file.type in [
@@ -125,35 +119,35 @@ if st.button("🔍 Consultar") and uploaded_file and pergunta:
                 df = pd.read_excel(uploaded_file)
 
             colunas = df.columns.tolist()
-            melhor_coluna, score = process.extractOne(pergunta, colunas, scorer=fuzz.partial_ratio)
+            melhor_coluna, score = process.extractOne(item, colunas, scorer=fuzz.partial_ratio)
             if score >= 60:
                 df_filtrado = df[[melhor_coluna]]
                 valores = []
                 for val in df_filtrado[melhor_coluna]:
                     val_str = str(val)
-                    match = re.search(r"\d+([.,]\d+)?", val_str)
+                    match = re.search(r'\d+[.,]\d+', val_str)
                     if match:
                         v = match.group().replace(".", ",")
                         valores.append(f"R$ {v}")
                 if valores:
-                    resposta = f"💰 Valores encontrados: {', '.join(valores)}"
+                    resposta = f"💰 Valores encontrados para '{item}': {', '.join(valores)}"
                 else:
-                    resposta = "❌ Nenhum valor encontrado para este item."
+                    resposta = f"❌ Nenhum valor encontrado para '{item}'."
             else:
-                resposta = "❌ Nenhum valor encontrado para este item."
+                resposta = f"❌ Nenhuma coluna próxima de '{item}' encontrada."
         except Exception as e:
             resposta = f"❌ Erro ao processar planilha: {e}"
 
-    adicionar_historico(pergunta, resposta)
+    adicionar_historico(item, resposta)
     st.success(resposta)
 
 # ============================================================
 # 🕓 Histórico (máx. 3)
 # ============================================================
 st.subheader("📜 Histórico das últimas perguntas")
-for item in reversed(st.session_state["historico"]):
-    st.write(f"**Pergunta:** {item['pergunta']}")
-    st.write(f"**Resposta:** {item['resposta']}")
+for item_hist in reversed(st.session_state["historico"]):
+    st.write(f"**Pergunta:** {item_hist['pergunta']}")
+    st.write(f"**Resposta:** {item_hist['resposta']}")
     st.markdown("---")
 
 # ============================================================
