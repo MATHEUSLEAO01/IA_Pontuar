@@ -1,171 +1,94 @@
 import streamlit as st
-import pandas as pd
-from openai import OpenAI
-import pdfplumber
 from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
-import camelot
 import re
-from transformers import pipeline
+from io import BytesIO
+import pandas as pd
 
-# -----------------------------
-# Inicialização
-# -----------------------------
-st.set_page_config(page_title="IA Leitora de Planilhas Avançada", layout="wide")
-st.title("📊 IA Leitora de Planilhas Avançada - Pontuar Tech")
-st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Informe o tipo → 3️⃣ Faça uma pergunta → 4️⃣ Veja a resposta!")
+# --- Função de pré-processamento da imagem ---
+def pre_processar_imagem(img_file):
+    img = Image.open(img_file).convert("L")  # grayscale
+    img = img.filter(ImageFilter.MedianFilter())  # remover ruído
+    img = ImageEnhance.Contrast(img).enhance(2)  # aumentar contraste
+    # binarização
+    img = img.point(lambda x: 0 if x < 140 else 255, '1')
+    return img
 
-# OpenAI
-client = OpenAI(api_key=st.secrets["general"]["OPENAI_API_KEY"])
+# --- Função para extrair valores do texto OCR ---
+def extrair_valores(texto):
+    # limpa espaços e quebras
+    texto = re.sub(r"\s*,\s*", ",", texto)
+    texto = re.sub(r"\s+", "", texto)
+    # regex para capturar valores monetários
+    valores = re.findall(r"R?\$?(\d+,\d{2})", texto)
+    return [f"R$ {v}" for v in valores]
 
-# Hugging Face como fallback gratuito
-hf_pipeline = pipeline("text-generation", model="bigscience/bloom-560m", device=-1)  # CPU
-
-# -----------------------------
-# Sessão
-# -----------------------------
+# --- Histórico de perguntas (máx. 3) ---
 if "historico" not in st.session_state:
     st.session_state["historico"] = []
 
-# -----------------------------
-# Upload
-# -----------------------------
-uploaded_file = st.file_uploader(
-    "📂 Envie planilha (.xlsx), PDF ou imagem (.png, .jpg, .jpeg)",
-    type=["xlsx", "pdf", "png", "jpg", "jpeg"]
-)
+def adicionar_historico(pergunta, resposta):
+    st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta})
+    if len(st.session_state["historico"]) > 3:
+        st.session_state["historico"] = st.session_state["historico"][-3:]
 
-# -----------------------------
-# Funções auxiliares
-# -----------------------------
-def extrair_texto_pdf(file):
-    texto = ""
-    try:
-        with pdfplumber.open(file) as pdf:
-            for page in pdf.pages:
-                texto += page.extract_text() or ""
-    except:
-        pass
-    return texto
+# --- Layout Streamlit ---
+st.title("📊 IA Leitora de Planilhas e Imagens Avançada")
 
-def extrair_tabelas_pdf(file):
-    try:
-        tables = camelot.read_pdf(file, pages="all", flavor="stream")
-        if tables and len(tables) > 0:
-            df = tables[0].df
-            df.columns = df.iloc[0]
-            df = df[1:]
-            return df
-    except:
-        return None
-    return None
+uploaded_file = st.file_uploader("📂 Envie planilha, PDF ou imagem", type=["xlsx", "csv", "png", "jpg", "jpeg", "pdf"])
 
-def pre_processar_imagem(imagem):
-    # Converter para cinza
-    imagem = imagem.convert("L")
-    # Aumentar contraste
-    imagem = ImageEnhance.Contrast(imagem).enhance(2)
-    # Filtro de nitidez
-    imagem = imagem.filter(ImageFilter.SHARPEN)
-    return imagem
+pergunta = st.text_input("💬 Faça sua pergunta (ex: valor do frango inteiro)")
 
-def extrair_texto_imagem(file):
-    imagem = Image.open(file)
-    imagem = pre_processar_imagem(imagem)
-    texto = pytesseract.image_to_string(imagem, lang="por")
-    # Limpeza básica
-    texto = texto.replace("\n", " ").replace("\r", " ")
-    texto = re.sub(r"\s+", " ", texto)
-    return texto
-
-def extrair_valores(texto):
-    # Regex robusta para capturar R$ e números com vírgula
-    valores = re.findall(r"(?:R\$?\s*)?(\d{1,3},\d{2})", texto)
-    valores = [f"R$ {v}" for v in valores]
-    return valores
-
-# -----------------------------
-# Processamento de arquivo
-# -----------------------------
-texto_extraido = None
-df = None
-
-if uploaded_file:
-    nome = uploaded_file.name.lower()
-    try:
-        if nome.endswith(".xlsx"):
-            df = pd.read_excel(uploaded_file)
-            st.success("✅ Planilha Excel carregada!")
-        elif nome.endswith(".pdf"):
-            df = extrair_tabelas_pdf(uploaded_file)
-            if df is not None:
-                st.success("✅ Tabela detectada e carregada do PDF!")
+if st.button("🔍 Consultar") and uploaded_file and pergunta:
+    resposta = ""
+    
+    # --- Se for imagem ---
+    if uploaded_file.type in ["image/png", "image/jpeg", "image/jpg"]:
+        img = pre_processar_imagem(uploaded_file)
+        texto = pytesseract.image_to_string(img, lang="por")
+        valores = extrair_valores(texto)
+        if valores:
+            resposta = f"💰 Valores encontrados: {', '.join(valores)}"
+        else:
+            resposta = "❌ Nenhum valor encontrado para este item."
+    
+    # --- Se for planilha ---
+    elif uploaded_file.type in ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/csv"]:
+        try:
+            if uploaded_file.type == "text/csv":
+                df = pd.read_csv(uploaded_file)
             else:
-                texto_extraido = extrair_texto_pdf(uploaded_file)
-                st.info("📄 Nenhuma tabela detectada — texto extraído para análise.")
-        elif nome.endswith((".png", ".jpg", ".jpeg")):
-            texto_extraido = extrair_texto_imagem(uploaded_file)
-            st.success("✅ Texto extraído da imagem!")
-    except Exception as e:
-        st.error(f"❌ Erro ao processar: {e}")
-        st.stop()
+                df = pd.read_excel(uploaded_file)
+            
+            # busca valores relacionados à pergunta
+            mask = df.apply(lambda row: row.astype(str).str.contains(pergunta, case=False).any(), axis=1)
+            df_filtrado = df[mask]
+            
+            if not df_filtrado.empty:
+                valores = []
+                for col in df_filtrado.columns:
+                    for val in df_filtrado[col]:
+                        val_str = str(val)
+                        if re.match(r"\d+([.,]\d+)?", val_str):
+                            val_str = val_str.replace(",", ".")
+                            valores.append(f"R$ {float(val_str):.2f}".replace(".", ","))
+                resposta = f"💰 Valores encontrados: {', '.join(valores)}"
+            else:
+                resposta = "❌ Nenhum valor encontrado para este item."
+        except Exception as e:
+            resposta = f"❌ Erro ao processar planilha: {e}"
+    
+    adicionar_historico(pergunta, resposta)
+    st.success(resposta)
 
-# -----------------------------
-# Caixa de pergunta
-# -----------------------------
-pergunta = st.text_input("💬 Sua pergunta:")
+# --- Histórico ---
+st.subheader("📜 Histórico das últimas perguntas")
+for item in reversed(st.session_state["historico"]):
+    st.write(f"**Pergunta:** {item['pergunta']}")
+    st.write(f"**Resposta:** {item['resposta']}")
+    st.markdown("---")
 
-# -----------------------------
-# Função para gerar resposta HF
-# -----------------------------
-def gerar_resposta_hf(conteudo):
-    try:
-        if len(conteudo) > 1000:  # limitar para não travar o modelo
-            conteudo = conteudo[-1000:]
-        saida = hf_pipeline(f"Responda detalhadamente: {conteudo}", max_new_tokens=256)
-        return saida[0]["generated_text"]
-    except:
-        return "Não foi possível gerar resposta gratuita."
-
-# -----------------------------
-# Processamento
-# -----------------------------
-if st.button("🔍 Perguntar") and (df is not None or texto_extraido):
-    try:
-        if df is not None:
-            conteudo = df.to_string()
-        else:
-            conteudo = texto_extraido
-        
-        # Extrair valores limpos
-        valores_encontrados = extrair_valores(conteudo)
-        if valores_encontrados:
-            resposta = f"💰 Valores encontrados: {', '.join(valores_encontrados)}"
-        else:
-            resposta = "Nenhum valor encontrado para este item."
-
-        st.subheader("✅ Resposta Detalhada:")
-        st.write(resposta)
-
-        # Histórico limitado a 3
-        st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta})
-        if len(st.session_state["historico"]) > 3:
-            st.session_state["historico"] = st.session_state["historico"][-3:]
-
-    except Exception as e:
-        st.error(f"Erro: {e}")
-
-# -----------------------------
-# Histórico
-# -----------------------------
-if st.session_state["historico"]:
-    st.subheader("📜 Histórico de perguntas recentes")
-    for h in reversed(st.session_state["historico"]):
-        st.markdown(f"**Pergunta:** {h['pergunta']}  \n**Resposta:** {h['resposta']}")
-
-# -----------------------------
-# Botão para limpar histórico
-# -----------------------------
-if st.button("🧹 Limpar Histórico"):
+# --- Botão limpar histórico ---
+if st.button("🧹 Limpar histórico"):
     st.session_state["historico"] = []
-    st.success("Histórico limpo!")
+    st.success("✅ Histórico limpo!")
