@@ -1,8 +1,6 @@
 streamlit
-pandas
 openai
+pandas
 matplotlib
-pdfplumber
-pytesseract
-pillow
-camelot-py[cv]
+PyPDF2
+Pillow
