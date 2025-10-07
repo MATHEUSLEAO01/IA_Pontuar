@@ -5,10 +5,8 @@ import pdfplumber
 from PIL import Image
 import pytesseract
 import camelot
-from PyPDF2 import PdfReader
-import io
 from transformers import pipeline
-import re  # <--- necessário para formatar valores
+import re
 
 # -----------------------------
 # Inicialização
@@ -66,13 +64,10 @@ def extrair_texto_imagem(file):
     imagem = Image.open(file)
     return pytesseract.image_to_string(imagem, lang="por")
 
-# -----------------------------
-# Função para limpar e formatar valores na resposta
-# -----------------------------
 def formatar_valores_resposta(texto):
     # Remove múltiplos espaços e quebras de linha
     texto = re.sub(r'\s+', ' ', texto)
-    # Normaliza valores monetários repetidos e espaços desnecessários
+    # Normaliza valores monetários
     texto = re.sub(r'R?\s?([\d]+,[\d]{2})', r'R$ \1', texto)
     return texto.strip()
 
@@ -125,10 +120,18 @@ def gerar_resposta_hf(conteudo):
         return "Não foi possível gerar resposta gratuita."
 
 # -----------------------------
+# Botão para limpar histórico
+# -----------------------------
+if st.button("🗑 Limpar histórico"):
+    st.session_state["historico"] = []
+    st.success("Histórico limpo!")
+
+# -----------------------------
 # Processamento
 # -----------------------------
 if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_planilha:
     try:
+        # Se for planilha, analisar colunas
         if df is not None:
             resumo = {
                 "tipo_planilha": tipo_planilha,
@@ -163,7 +166,11 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_p
 
         st.subheader("✅ Resposta Detalhada:")
         st.write(texto_completo)
+
+        # Limita histórico a 3 perguntas recentes
         st.session_state["historico"].append({"pergunta": pergunta, "resposta": texto_completo})
+        if len(st.session_state["historico"]) > 3:
+            st.session_state["historico"] = st.session_state["historico"][-3:]
 
     except Exception as e:
         st.error(f"Erro: {e}")
@@ -173,5 +180,5 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_p
 # -----------------------------
 if st.session_state["historico"]:
     st.subheader("📜 Histórico de perguntas recentes")
-    for h in reversed(st.session_state["historico"][-5:]):
+    for h in reversed(st.session_state["historico"]):
         st.markdown(f"**Pergunta:** {h['pergunta']}  \n**Resposta:** {h['resposta']}")
