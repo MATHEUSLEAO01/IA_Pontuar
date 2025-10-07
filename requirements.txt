@@ -10,3 +10,5 @@ transformers
 torch
 fuzzywuzzy[speedup]
 opencv-python-headless
+
+pip install google-cloud-vision
