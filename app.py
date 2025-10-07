@@ -1,30 +1,29 @@
-import pandas as pd
 import streamlit as st
+import pandas as pd
 from openai import OpenAI
 import matplotlib.pyplot as plt
-import pdfplumber
-import pytesseract
+from PyPDF2 import PdfReader
 from PIL import Image
+import base64
 import io
-import camelot
 
 # -----------------------------
-# Inicialização
+# CONFIGURAÇÃO INICIAL
 # -----------------------------
 st.set_page_config(page_title="IA Leitora de Planilhas Avançada", layout="wide")
-st.title("📊 IA Leitora de Planilhas Avançada - Pontuar tech")
+st.title("📊 IA Leitora de Planilhas Avançada - Pontuar Tech")
 st.markdown("1️⃣ Envie uma planilha, PDF ou imagem → 2️⃣ Informe o tipo → 3️⃣ Faça uma pergunta → 4️⃣ Veja a resposta!")
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # -----------------------------
-# Sessão
+# SESSÃO
 # -----------------------------
 if "historico" not in st.session_state:
     st.session_state["historico"] = []
 
 # -----------------------------
-# Upload
+# UPLOAD
 # -----------------------------
 uploaded_file = st.file_uploader(
     "📂 Envie uma planilha (.xlsx), PDF ou imagem (.png, .jpg)",
@@ -32,7 +31,7 @@ uploaded_file = st.file_uploader(
 )
 
 # -----------------------------
-# Funções auxiliares
+# FUNÇÕES AUXILIARES
 # -----------------------------
 def detectar_colunas_avancado(df):
     keywords = ["gasto", "valor", "custo", "preço", "despesa", "total"]
@@ -44,72 +43,92 @@ def detectar_colunas_avancado(df):
     return list(set(colunas_financeiras)), df
 
 
-def extrair_texto_pdf(file):
-    texto = ""
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
-            texto += page.extract_text() or ""
-    return texto
+def extrair_texto_arquivo(file, client):
+    """Extrai texto de PDFs e imagens via GPT-4o (sem Tesseract)."""
+    nome = file.name.lower()
+    tipo = file.type
 
+    # Caso Excel
+    if nome.endswith(".xlsx"):
+        return pd.read_excel(file)
 
-def extrair_tabelas_pdf(file):
-    """Extrai tabelas do PDF e retorna o primeiro DataFrame encontrado."""
-    try:
-        tables = camelot.read_pdf(file, pages="all", flavor="stream")
-        if tables and len(tables) > 0:
-            df = tables[0].df
-            df.columns = df.iloc[0]
-            df = df[1:]
-            return df
-    except Exception:
-        pass
-    return None
+    # Caso PDF (tentativa com PyPDF2, depois GPT)
+    elif "pdf" in tipo or nome.endswith(".pdf"):
+        try:
+            reader = PdfReader(file)
+            texto_pdf = ""
+            for page in reader.pages:
+                texto_pdf += page.extract_text() or ""
+            if texto_pdf.strip():
+                return texto_pdf
+        except Exception:
+            pass  # Vai tentar OCR via GPT
 
+        file.seek(0)
+        pdf_bytes = file.read()
+        base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Extraia todo o texto legível deste PDF em português:"},
+                    {"type": "image_url", "image_url": f"data:application/pdf;base64,{base64_pdf}"}
+                ]}
+            ]
+        )
+        return response.choices[0].message.content
 
-def extrair_texto_imagem(file):
-    imagem = Image.open(file)
-    return pytesseract.image_to_string(imagem, lang="por")
+    # Caso imagem (OCR direto com GPT-4o)
+    elif any(ext in tipo for ext in ["image/png", "image/jpeg", "image/jpg"]):
+        img_bytes = file.read()
+        base64_image = base64.b64encode(img_bytes).decode("utf-8")
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Extraia todo o texto desta imagem em português:"},
+                    {"type": "image_url", "image_url": f"data:image/png;base64,{base64_image}"}
+                ]}
+            ]
+        )
+        return response.choices[0].message.content
+
+    else:
+        return None
+
 
 # -----------------------------
-# Processamento de arquivo
+# PROCESSAMENTO DE ARQUIVO
 # -----------------------------
 texto_extraido = None
 df = None
 
 if uploaded_file:
-    nome = uploaded_file.name.lower()
-    try:
-        if nome.endswith(".xlsx"):
-            df = pd.read_excel(uploaded_file)
-            st.success("✅ Planilha Excel carregada!")
-        elif nome.endswith(".pdf"):
-            # Primeiro tenta extrair tabela
-            df = extrair_tabelas_pdf(uploaded_file)
-            if df is not None:
-                st.success("✅ Tabela detectada e carregada do PDF!")
-            else:
-                texto_extraido = extrair_texto_pdf(uploaded_file)
-                st.info("📄 Nenhuma tabela detectada — texto extraído para análise.")
-        elif nome.endswith((".png", ".jpg", ".jpeg")):
-            texto_extraido = extrair_texto_imagem(uploaded_file)
-            st.success("✅ Texto extraído da imagem!")
-    except Exception as e:
-        st.error(f"❌ Erro ao processar: {e}")
+    resultado = extrair_texto_arquivo(uploaded_file, client)
+    if isinstance(resultado, pd.DataFrame):
+        df = resultado
+        st.success("✅ Planilha Excel carregada!")
+    elif isinstance(resultado, str):
+        texto_extraido = resultado
+        st.success("✅ Texto extraído com sucesso!")
+        st.text_area("🧾 Texto detectado:", texto_extraido[:5000])
+    else:
+        st.error("❌ Tipo de arquivo não reconhecido ou vazio.")
         st.stop()
 
 # -----------------------------
-# Tipo de conteúdo
+# TIPO DE CONTEÚDO
 # -----------------------------
 tipo_planilha = st.text_input("🗂 Qual o tipo de conteúdo? (ex.: vendas, gastos, notas fiscais...)")
 
 # -----------------------------
-# Caixa de pergunta
+# CAIXA DE PERGUNTA
 # -----------------------------
 pergunta = st.text_input("💬 Sua pergunta:")
 tipo_resposta = st.radio("Tipo de resposta:", ["Resumo simples", "Detalhes adicionais"], index=0)
 
 # -----------------------------
-# Processamento
+# PROCESSAMENTO DE PERGUNTA
 # -----------------------------
 if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_planilha:
     try:
@@ -126,7 +145,7 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_p
         prompt_system = (
             "Você é um assistente especialista em análise de planilhas, PDFs e textos financeiros em português. "
             "Analise os dados e responda com clareza e precisão. "
-            "Organize sua resposta em duas partes: 'Resumo simples' e 'Detalhes adicionais'. "
+            "Organize a resposta em duas partes: 'Resumo simples' e 'Detalhes adicionais'. "
             "Se algo não for encontrado, diga 'Não encontrado'."
         )
 
@@ -158,7 +177,7 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_p
         st.error(f"Erro: {e}")
 
 # -----------------------------
-# Visualizações
+# VISUALIZAÇÕES
 # -----------------------------
 if df is not None:
     st.subheader("📊 Visualizações básicas")
@@ -176,7 +195,7 @@ if df is not None:
         st.info("Nenhuma coluna numérica detectada.")
 
 # -----------------------------
-# Histórico
+# HISTÓRICO
 # -----------------------------
 if st.session_state["historico"]:
     st.subheader("📜 Histórico de perguntas recentes")
