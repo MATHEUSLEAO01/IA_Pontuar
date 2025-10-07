@@ -1,31 +1,26 @@
 import streamlit as st
 import pandas as pd
-import pytesseract
-from PIL import Image
-import pdfplumber
-import camelot
 from openai import OpenAI
-from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+import pdfplumber
+from PIL import Image
+import pytesseract
+import camelot
+from PyPDF2 import PdfReader
+import io
+from transformers import pipeline
 
+# -----------------------------
+# Inicialização
+# -----------------------------
 st.set_page_config(page_title="IA Leitora de Planilhas Avançada", layout="wide")
 st.title("📊 IA Leitora de Planilhas Avançada - Pontuar Tech")
 st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Informe o tipo → 3️⃣ Faça uma pergunta → 4️⃣ Veja a resposta!")
 
-# -----------------------------
-# OpenAI Client
-# -----------------------------
+# OpenAI
 client = OpenAI(api_key=st.secrets["general"]["OPENAI_API_KEY"])
 
-# -----------------------------
-# Hugging Face Fallback
-# -----------------------------
-@st.cache_resource
-def carregar_modelo_hf():
-    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-large")
-    model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-large")
-    return pipeline("text2text-generation", model=model, tokenizer=tokenizer)
-
-hf_pipeline = carregar_modelo_hf()
+# Hugging Face como fallback gratuito
+hf_pipeline = pipeline("text-generation", model="bigscience/bloom-560m", device=-1)  # CPU
 
 # -----------------------------
 # Sessão
@@ -41,14 +36,17 @@ uploaded_file = st.file_uploader(
     type=["xlsx", "pdf", "png", "jpg", "jpeg"]
 )
 
-df = None
-texto_extraido = None
-
+# -----------------------------
+# Funções auxiliares
+# -----------------------------
 def extrair_texto_pdf(file):
     texto = ""
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
-            texto += page.extract_text() or ""
+    try:
+        with pdfplumber.open(file) as pdf:
+            for page in pdf.pages:
+                texto += page.extract_text() or ""
+    except:
+        pass
     return texto
 
 def extrair_tabelas_pdf(file):
@@ -67,6 +65,12 @@ def extrair_texto_imagem(file):
     imagem = Image.open(file)
     return pytesseract.image_to_string(imagem, lang="por")
 
+# -----------------------------
+# Processamento de arquivo
+# -----------------------------
+texto_extraido = None
+df = None
+
 if uploaded_file:
     nome = uploaded_file.name.lower()
     try:
@@ -76,7 +80,7 @@ if uploaded_file:
         elif nome.endswith(".pdf"):
             df = extrair_tabelas_pdf(uploaded_file)
             if df is not None:
-                st.success("✅ Tabela detectada no PDF!")
+                st.success("✅ Tabela detectada e carregada do PDF!")
             else:
                 texto_extraido = extrair_texto_pdf(uploaded_file)
                 st.info("📄 Nenhuma tabela detectada — texto extraído para análise.")
@@ -84,63 +88,71 @@ if uploaded_file:
             texto_extraido = extrair_texto_imagem(uploaded_file)
             st.success("✅ Texto extraído da imagem!")
     except Exception as e:
-        st.error(f"❌ Erro ao processar arquivo: {e}")
+        st.error(f"❌ Erro ao processar: {e}")
         st.stop()
 
 # -----------------------------
-# Tipo e pergunta
+# Tipo de conteúdo
 # -----------------------------
-tipo_conteudo = st.text_input("🗂 Tipo de conteúdo (ex.: vendas, gastos, estoque...)")
+tipo_planilha = st.text_input("🗂 Qual o tipo de conteúdo? (ex.: vendas, gastos, notas fiscais...)")
+
+# -----------------------------
+# Caixa de pergunta
+# -----------------------------
 pergunta = st.text_input("💬 Sua pergunta:")
 
 # -----------------------------
-# Funções de Resposta
+# Função para gerar resposta HF
 # -----------------------------
-def gerar_resposta_openai(conteudo):
-    try:
-        prompt = (
-            "Você é um assistente especialista em análise de planilhas, PDFs e textos financeiros em português. "
-            "Forneça sempre uma resposta detalhada e precisa, sem resumo simples. "
-            "Se não encontrar dados suficientes, diga 'Não encontrado'.\n\n"
-            f"{conteudo}"
-        )
-        resposta = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return resposta.choices[0].message.content.strip()
-    except:
-        return None
-
 def gerar_resposta_hf(conteudo):
     try:
-        saida = hf_pipeline(f"Responda detalhadamente: {conteudo}", max_length=1024)
+        if len(conteudo) > 1000:  # limitar para não travar o modelo
+            conteudo = conteudo[-1000:]
+        saida = hf_pipeline(f"Responda detalhadamente: {conteudo}", max_new_tokens=256)
         return saida[0]["generated_text"]
     except:
-        return None
+        return "Não foi possível gerar resposta gratuita."
 
 # -----------------------------
 # Processamento
 # -----------------------------
-if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_conteudo and pergunta:
-    conteudo = ""
-    if df is not None:
-        df_preview = df.head(10).to_dict(orient="records")
-        conteudo = f"Tipo: {tipo_conteudo}\nDados:\n{df_preview}\nPergunta: {pergunta}"
-    else:
-        conteudo = f"Tipo: {tipo_conteudo}\nTexto extraído:\n{texto_extraido}\nPergunta: {pergunta}"
+if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_planilha:
+    try:
+        if df is not None:
+            resumo = {
+                "tipo_planilha": tipo_planilha,
+                "colunas": list(df.columns),
+                "amostra": df.head(10).to_dict(orient="records"),
+            }
+            conteudo = f"Resumo da planilha:\n{resumo}\nPergunta: {pergunta}"
+        else:
+            conteudo = f"Texto detectado:\n{texto_extraido}\nPergunta: {pergunta}"
 
-    # Primeiro OpenAI
-    resposta = gerar_resposta_openai(conteudo)
-    if not resposta:
-        resposta = gerar_resposta_hf(conteudo)
-    if not resposta:
-        resposta = "❌ Não foi possível gerar resposta gratuita."
+        prompt_system = (
+            "Você é um assistente especialista em análise de planilhas, PDFs e textos financeiros em português. "
+            "Responda detalhadamente. Se não houver informação, diga 'Não encontrado'."
+        )
 
-    st.subheader("✅ Resposta Detalhada:")
-    st.write(resposta)
+        # Tenta OpenAI GPT-4o-mini
+        try:
+            resposta = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": prompt_system},
+                    {"role": "user", "content": conteudo}
+                ]
+            )
+            texto_completo = resposta.choices[0].message.content.strip()
+        except Exception:
+            # Se falhar, usa Hugging Face
+            texto_completo = gerar_resposta_hf(conteudo)
 
-    st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta})
+        st.subheader("✅ Resposta Detalhada:")
+        st.write(texto_completo)
+        st.session_state["historico"].append({"pergunta": pergunta, "resposta": texto_completo})
+
+    except Exception as e:
+        st.error(f"Erro: {e}")
 
 # -----------------------------
 # Histórico
