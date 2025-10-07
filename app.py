@@ -6,16 +6,20 @@ from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
 import camelot
 import re
+from transformers import pipeline
 
 # -----------------------------
 # Inicialização
 # -----------------------------
 st.set_page_config(page_title="IA Leitora de Planilhas Avançada", layout="wide")
 st.title("📊 IA Leitora de Planilhas Avançada - Pontuar Tech")
-st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Faça uma pergunta → 3️⃣ Veja a resposta!")
+st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Informe o tipo → 3️⃣ Faça uma pergunta → 4️⃣ Veja a resposta!")
 
 # OpenAI
 client = OpenAI(api_key=st.secrets["general"]["OPENAI_API_KEY"])
+
+# Hugging Face como fallback gratuito
+hf_pipeline = pipeline("text-generation", model="bigscience/bloom-560m", device=-1)  # CPU
 
 # -----------------------------
 # Sessão
@@ -56,24 +60,27 @@ def extrair_tabelas_pdf(file):
         return None
     return None
 
-def preprocess_image(file):
-    imagem = Image.open(file).convert("L")  # cinza
-    imagem = ImageEnhance.Contrast(imagem).enhance(2)  # aumenta contraste
-    imagem = imagem.filter(ImageFilter.SHARPEN)  # nitidez
+def pre_processar_imagem(imagem):
+    # Converter para cinza
+    imagem = imagem.convert("L")
+    # Aumentar contraste
+    imagem = ImageEnhance.Contrast(imagem).enhance(2)
+    # Filtro de nitidez
+    imagem = imagem.filter(ImageFilter.SHARPEN)
     return imagem
 
 def extrair_texto_imagem(file):
-    imagem = preprocess_image(file)
+    imagem = Image.open(file)
+    imagem = pre_processar_imagem(imagem)
     texto = pytesseract.image_to_string(imagem, lang="por")
-    # Normalizar texto
-    texto = texto.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    # Limpeza básica
+    texto = texto.replace("\n", " ").replace("\r", " ")
     texto = re.sub(r"\s+", " ", texto)
     return texto
 
 def extrair_valores(texto):
-    # Regex para valores R$ ou apenas números com vírgula
-    valores = re.findall(r"R?\$?\s*\d{1,3},\d{2}", texto)
-    valores = [v.replace("R$", "").replace("R", "").strip() for v in valores]
+    # Regex robusta para capturar R$ e números com vírgula
+    valores = re.findall(r"(?:R\$?\s*)?(\d{1,3},\d{2})", texto)
     valores = [f"R$ {v}" for v in valores]
     return valores
 
@@ -109,38 +116,38 @@ if uploaded_file:
 pergunta = st.text_input("💬 Sua pergunta:")
 
 # -----------------------------
-# Botão limpar histórico
+# Função para gerar resposta HF
 # -----------------------------
-if st.button("🗑 Limpar Histórico"):
-    st.session_state["historico"] = []
+def gerar_resposta_hf(conteudo):
+    try:
+        if len(conteudo) > 1000:  # limitar para não travar o modelo
+            conteudo = conteudo[-1000:]
+        saida = hf_pipeline(f"Responda detalhadamente: {conteudo}", max_new_tokens=256)
+        return saida[0]["generated_text"]
+    except:
+        return "Não foi possível gerar resposta gratuita."
 
 # -----------------------------
 # Processamento
 # -----------------------------
-if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and pergunta:
+if st.button("🔍 Perguntar") and (df is not None or texto_extraido):
     try:
-        conteudo = ""
         if df is not None:
-            conteudo = df.to_csv(index=False)
-        elif texto_extraido:
+            conteudo = df.to_string()
+        else:
             conteudo = texto_extraido
-
-        # Extrair valores
-        valores = extrair_valores(conteudo)
-
-        # Tentar achar valor exato da pergunta
-        resposta = "Nenhum valor encontrado para este item."
-        for v in valores:
-            if pergunta.lower() in conteudo.lower():
-                resposta = f"💰 Valores relacionados: {', '.join(valores)}"
-                break
-        if valores and "Nenhum valor" in resposta:
-            resposta = f"💰 Valores encontrados: {', '.join(valores)}"
+        
+        # Extrair valores limpos
+        valores_encontrados = extrair_valores(conteudo)
+        if valores_encontrados:
+            resposta = f"💰 Valores encontrados: {', '.join(valores_encontrados)}"
+        else:
+            resposta = "Nenhum valor encontrado para este item."
 
         st.subheader("✅ Resposta Detalhada:")
         st.write(resposta)
 
-        # Salvar histórico (máx 3 últimos)
+        # Histórico limitado a 3
         st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta})
         if len(st.session_state["historico"]) > 3:
             st.session_state["historico"] = st.session_state["historico"][-3:]
@@ -155,3 +162,10 @@ if st.session_state["historico"]:
     st.subheader("📜 Histórico de perguntas recentes")
     for h in reversed(st.session_state["historico"]):
         st.markdown(f"**Pergunta:** {h['pergunta']}  \n**Resposta:** {h['resposta']}")
+
+# -----------------------------
+# Botão para limpar histórico
+# -----------------------------
+if st.button("🧹 Limpar Histórico"):
+    st.session_state["historico"] = []
+    st.success("Histórico limpo!")
