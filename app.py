@@ -7,18 +7,18 @@ import camelot
 from openai import OpenAI
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 
-# -----------------------------
-# Inicialização
-# -----------------------------
 st.set_page_config(page_title="IA Leitora de Planilhas Avançada", layout="wide")
 st.title("📊 IA Leitora de Planilhas Avançada - Pontuar Tech")
 st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Informe o tipo → 3️⃣ Faça uma pergunta → 4️⃣ Veja a resposta!")
 
-# OpenAI client
-openai_key = st.secrets["general"]["OPENAI_API_KEY"]
-client = OpenAI(api_key=openai_key)
+# -----------------------------
+# OpenAI Client
+# -----------------------------
+client = OpenAI(api_key=st.secrets["general"]["OPENAI_API_KEY"])
 
-# Hugging Face fallback (Flan-T5)
+# -----------------------------
+# Hugging Face Fallback
+# -----------------------------
 @st.cache_resource
 def carregar_modelo_hf():
     tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-large")
@@ -88,35 +88,33 @@ if uploaded_file:
         st.stop()
 
 # -----------------------------
-# Tipo de conteúdo e pergunta
+# Tipo e pergunta
 # -----------------------------
-tipo_conteudo = st.text_input("🗂 Qual o tipo de conteúdo? (ex.: vendas, gastos, estoque...)")
+tipo_conteudo = st.text_input("🗂 Tipo de conteúdo (ex.: vendas, gastos, estoque...)")
 pergunta = st.text_input("💬 Sua pergunta:")
 
 # -----------------------------
-# Função para gerar resposta detalhada
+# Funções de Resposta
 # -----------------------------
 def gerar_resposta_openai(conteudo):
     try:
-        prompt_system = (
+        prompt = (
             "Você é um assistente especialista em análise de planilhas, PDFs e textos financeiros em português. "
             "Forneça sempre uma resposta detalhada e precisa, sem resumo simples. "
-            "Se não encontrar dados suficientes, diga 'Não encontrado'."
+            "Se não encontrar dados suficientes, diga 'Não encontrado'.\n\n"
+            f"{conteudo}"
         )
         resposta = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": prompt_system},
-                {"role": "user", "content": conteudo}
-            ]
+            messages=[{"role": "user", "content": prompt}]
         )
         return resposta.choices[0].message.content.strip()
-    except Exception as e:
+    except:
         return None
 
-def gerar_resposta_hf(texto):
+def gerar_resposta_hf(conteudo):
     try:
-        saida = hf_pipeline(f"Responda detalhadamente: {texto}", max_length=1024)
+        saida = hf_pipeline(f"Responda detalhadamente: {conteudo}", max_length=1024)
         return saida[0]["generated_text"]
     except:
         return None
@@ -132,19 +130,16 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_c
     else:
         conteudo = f"Tipo: {tipo_conteudo}\nTexto extraído:\n{texto_extraido}\nPergunta: {pergunta}"
 
-    # Tenta OpenAI
+    # Primeiro OpenAI
     resposta = gerar_resposta_openai(conteudo)
     if not resposta:
-        # fallback HF gratuito
         resposta = gerar_resposta_hf(conteudo)
-    
     if not resposta:
         resposta = "❌ Não foi possível gerar resposta gratuita."
 
     st.subheader("✅ Resposta Detalhada:")
     st.write(resposta)
 
-    # Histórico
     st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta})
 
 # -----------------------------
