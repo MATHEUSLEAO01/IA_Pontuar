@@ -5,19 +5,17 @@ import pdfplumber
 from PIL import Image
 import pytesseract
 import camelot
+import re
 
 # -----------------------------
 # Inicialização
 # -----------------------------
 st.set_page_config(page_title="IA Leitora de Planilhas Avançada", layout="wide")
 st.title("📊 IA Leitora de Planilhas Avançada - Pontuar Tech")
-st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Faça uma pergunta → 3️⃣ Veja a resposta!")
+st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Informe o tipo → 3️⃣ Faça uma pergunta → 4️⃣ Veja a resposta!")
 
 # OpenAI
 client = OpenAI(api_key=st.secrets["general"]["OPENAI_API_KEY"])
-
-# Hugging Face (não inicializa aqui para evitar travamento CPU)
-hf_pipeline = None
 
 # -----------------------------
 # Sessão
@@ -62,6 +60,14 @@ def extrair_texto_imagem(file):
     imagem = Image.open(file)
     return pytesseract.image_to_string(imagem, lang="por")
 
+def extrair_valores_legiveis(texto):
+    """Encontra valores no texto e retorna como lista legível"""
+    # Regex para valores R$ ou apenas números com vírgula
+    valores = re.findall(r"R?\$?\s*\d{1,3}(?:,\d{2})?", texto)
+    # Remove duplicados e espaços
+    valores = [v.replace("R$", "").strip() for v in valores]
+    return ", ".join(valores) if valores else "Nenhum valor encontrado"
+
 # -----------------------------
 # Processamento de arquivo
 # -----------------------------
@@ -94,68 +100,38 @@ if uploaded_file:
 pergunta = st.text_input("💬 Sua pergunta:")
 
 # -----------------------------
-# Função para gerar resposta Hugging Face sob demanda
+# Botão limpar histórico
 # -----------------------------
-def gerar_resposta_hf(conteudo):
-    global hf_pipeline
-    try:
-        if hf_pipeline is None:
-            from transformers import pipeline
-            hf_pipeline = pipeline("text-generation", model="distilgpt2", device=-1)  # modelo leve CPU
-        if len(conteudo) > 1000:
-            conteudo = conteudo[-1000:]
-        saida = hf_pipeline(f"Responda detalhadamente: {conteudo}", max_new_tokens=256)
-        return saida[0]["generated_text"]
-    except:
-        return "Não foi possível gerar resposta gratuita."
-
-# -----------------------------
-# Função para limpar histórico
-# -----------------------------
-if st.button("🧹 Limpar Histórico"):
+if st.button("🧹 Limpar histórico"):
     st.session_state["historico"] = []
+    st.success("Histórico limpo!")
 
 # -----------------------------
-# Processamento da pergunta
+# Processamento
 # -----------------------------
-if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and pergunta:
+if st.button("🔍 Perguntar") and (df is not None or texto_extraido):
     try:
-        # Monta conteúdo para análise
+        # Cria conteúdo resumido
         if df is not None:
-            resumo = {
-                "colunas": list(df.columns),
-                "amostra": df.head(10).to_dict(orient="records")
-            }
-            conteudo = f"Resumo da planilha:\n{resumo}\nPergunta: {pergunta}"
+            # pega apenas primeiras 5 linhas e colunas para não sobrecarregar
+            conteudo = f"Colunas: {list(df.columns)}\nAmostra: {df.head(5).to_dict(orient='records')}\nPergunta: {pergunta}"
+            texto_para_extrair_valores = df.to_string()
         else:
-            conteudo = f"Texto detectado:\n{texto_extraido}\nPergunta: {pergunta}"
+            # pega só os primeiros 1000 caracteres do texto
+            conteudo = f"Texto detectado:\n{texto_extraido[:1000]}\nPergunta: {pergunta}"
+            texto_para_extrair_valores = texto_extraido
 
-        prompt_system = (
-            "Você é um assistente especialista em análise de planilhas, PDFs e textos financeiros em português. "
-            "Responda detalhadamente. "
-            "Se houver valores monetários, organize-os de forma legível para o usuário. "
-            "Se não houver informação, diga 'Não encontrado'."
-        )
+        # Extrai valores de forma legível
+        valores_legiveis = extrair_valores_legiveis(texto_para_extrair_valores)
 
-        # Tenta OpenAI GPT-4o-mini
-        try:
-            resposta = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": prompt_system},
-                    {"role": "user", "content": conteudo}
-                ]
-            )
-            texto_completo = resposta.choices[0].message.content.strip()
-        except Exception:
-            # Se falhar, usa Hugging Face sob demanda
-            texto_completo = gerar_resposta_hf(conteudo)
+        # Monta resposta clara
+        resposta = f"💰 Valores encontrados relacionados à sua pergunta:\n{valores_legiveis}"
 
         st.subheader("✅ Resposta Detalhada:")
-        st.write(texto_completo)
+        st.write(resposta)
 
-        # Salva histórico (máx 3 entradas)
-        st.session_state["historico"].append({"pergunta": pergunta, "resposta": texto_completo})
+        # Mantém histórico limitado a 3
+        st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta})
         if len(st.session_state["historico"]) > 3:
             st.session_state["historico"] = st.session_state["historico"][-3:]
 
