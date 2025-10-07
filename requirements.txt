@@ -1,8 +1,10 @@
 streamlit
 pandas
 openai
-PyPDF2
 pdfplumber
 camelot-py[cv]
+pytesseract
 Pillow
-requests
+matplotlib
+transformers
+torch
