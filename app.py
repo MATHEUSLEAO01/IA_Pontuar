@@ -1,15 +1,14 @@
-import pandas as pd
 import streamlit as st
+import pandas as pd
 from openai import OpenAI
+import pdfplumber
 from PIL import Image
 import pytesseract
-import pdfplumber
+import camelot
+from PyPDF2 import PdfReader
 import io
-
-# Hugging Face para fallback gratuito
-from transformers import pipeline, set_seed
-import warnings
-warnings.filterwarnings("ignore")
+from transformers import pipeline
+import re  # <--- necessário para formatar valores
 
 # -----------------------------
 # Inicialização
@@ -18,15 +17,11 @@ st.set_page_config(page_title="IA Leitora de Planilhas Avançada", layout="wide"
 st.title("📊 IA Leitora de Planilhas Avançada - Pontuar Tech")
 st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Informe o tipo → 3️⃣ Faça uma pergunta → 4️⃣ Veja a resposta!")
 
-# -----------------------------
-# API Key OpenAI
-# -----------------------------
-try:
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    openai_disponivel = True
-except Exception:
-    st.warning("⚠️ OpenAI não configurado. Fallback gratuito será usado.")
-    openai_disponivel = False
+# OpenAI
+client = OpenAI(api_key=st.secrets["general"]["OPENAI_API_KEY"])
+
+# Hugging Face como fallback gratuito
+hf_pipeline = pipeline("text-generation", model="bigscience/bloom-560m", device=-1)  # CPU
 
 # -----------------------------
 # Sessão
@@ -35,46 +30,16 @@ if "historico" not in st.session_state:
     st.session_state["historico"] = []
 
 # -----------------------------
-# Inicializa variáveis antes do upload
-# -----------------------------
-df = None
-texto_extraido = None
-
-# -----------------------------
 # Upload
 # -----------------------------
 uploaded_file = st.file_uploader(
-    "📂 Envie planilha (.xlsx, PDF ou imagem)", 
+    "📂 Envie planilha (.xlsx), PDF ou imagem (.png, .jpg, .jpeg)",
     type=["xlsx", "pdf", "png", "jpg", "jpeg"]
 )
-
-# Limite de arquivo
-if uploaded_file is not None and uploaded_file.size > 5*1024*1024:
-    st.error("Arquivo muito grande! Limite de 5MB.")
-    st.stop()
 
 # -----------------------------
 # Funções auxiliares
 # -----------------------------
-def extrair_excel(file):
-    try:
-        df = pd.read_excel(file)
-        return df
-    except:
-        return None
-
-def extrair_tabelas_pdf(file):
-    try:
-        import camelot
-        tables = camelot.read_pdf(file, pages="all", flavor="stream")
-        if tables and len(tables) > 0:
-            df = tables[0].df
-            df.columns = df.iloc[0]
-            df = df[1:]
-            return df
-    except:
-        return None
-
 def extrair_texto_pdf(file):
     texto = ""
     try:
@@ -85,42 +50,62 @@ def extrair_texto_pdf(file):
         pass
     return texto
 
-def extrair_texto_imagem(file):
+def extrair_tabelas_pdf(file):
     try:
-        imagem = Image.open(file)
-        return pytesseract.image_to_string(imagem, lang="por")
+        tables = camelot.read_pdf(file, pages="all", flavor="stream")
+        if tables and len(tables) > 0:
+            df = tables[0].df
+            df.columns = df.iloc[0]
+            df = df[1:]
+            return df
     except:
-        return ""
+        return None
+    return None
 
-# Limita tamanho do texto para economizar memória
-def limitar_texto(texto, max_chars=2000):
-    return texto[-max_chars:]
+def extrair_texto_imagem(file):
+    imagem = Image.open(file)
+    return pytesseract.image_to_string(imagem, lang="por")
 
 # -----------------------------
-# Processar arquivo
+# Função para limpar e formatar valores na resposta
 # -----------------------------
+def formatar_valores_resposta(texto):
+    # Remove múltiplos espaços e quebras de linha
+    texto = re.sub(r'\s+', ' ', texto)
+    # Normaliza valores monetários repetidos e espaços desnecessários
+    texto = re.sub(r'R?\s?([\d]+,[\d]{2})', r'R$ \1', texto)
+    return texto.strip()
+
+# -----------------------------
+# Processamento de arquivo
+# -----------------------------
+texto_extraido = None
+df = None
+
 if uploaded_file:
     nome = uploaded_file.name.lower()
-    if nome.endswith(".xlsx"):
-        df = extrair_excel(uploaded_file)
-        if df is not None:
+    try:
+        if nome.endswith(".xlsx"):
+            df = pd.read_excel(uploaded_file)
             st.success("✅ Planilha Excel carregada!")
-    elif nome.endswith(".pdf"):
-        df = extrair_tabelas_pdf(uploaded_file)
-        if df is not None:
-            st.success("✅ Tabela detectada no PDF!")
-        else:
-            texto_extraido = extrair_texto_pdf(uploaded_file)
-            st.info("📄 Texto extraído do PDF para análise.")
-    elif nome.endswith((".png", ".jpg", ".jpeg")):
-        texto_extraido = extrair_texto_imagem(uploaded_file)
-        if texto_extraido:
+        elif nome.endswith(".pdf"):
+            df = extrair_tabelas_pdf(uploaded_file)
+            if df is not None:
+                st.success("✅ Tabela detectada e carregada do PDF!")
+            else:
+                texto_extraido = extrair_texto_pdf(uploaded_file)
+                st.info("📄 Nenhuma tabela detectada — texto extraído para análise.")
+        elif nome.endswith((".png", ".jpg", ".jpeg")):
+            texto_extraido = extrair_texto_imagem(uploaded_file)
             st.success("✅ Texto extraído da imagem!")
+    except Exception as e:
+        st.error(f"❌ Erro ao processar: {e}")
+        st.stop()
 
 # -----------------------------
 # Tipo de conteúdo
 # -----------------------------
-tipo_conteudo = st.text_input("🗂 Qual o tipo de conteúdo? (ex.: vendas, gastos, notas fiscais...)")
+tipo_planilha = st.text_input("🗂 Qual o tipo de conteúdo? (ex.: vendas, gastos, notas fiscais...)")
 
 # -----------------------------
 # Caixa de pergunta
@@ -128,68 +113,65 @@ tipo_conteudo = st.text_input("🗂 Qual o tipo de conteúdo? (ex.: vendas, gast
 pergunta = st.text_input("💬 Sua pergunta:")
 
 # -----------------------------
-# Função para gerar resposta
+# Função para gerar resposta HF
 # -----------------------------
-def gerar_resposta(conteudo, pergunta):
-    prompt = f"Analise os dados abaixo e responda com clareza e precisão apenas em português.\nConteúdo:\n{conteudo}\nPergunta: {pergunta}\nResposta detalhada:"
-
-    # Tenta OpenAI GPT
-    if openai_disponivel:
-        try:
-            resposta = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Você é um assistente especialista em análise de dados financeiros e textos em português."},
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            return resposta.choices[0].message.content.strip()
-        except Exception:
-            pass
-
-    # Fallback gratuito Hugging Face
+def gerar_resposta_hf(conteudo):
     try:
-        generator = pipeline("text-generation", model="distilgpt2", device=-1)
-        set_seed(42)
-        result = generator(prompt, max_length=256, do_sample=True)
-        return result[0]["generated_text"]
+        if len(conteudo) > 1000:  # limitar para não travar o modelo
+            conteudo = conteudo[-1000:]
+        saida = hf_pipeline(f"Responda detalhadamente: {conteudo}", max_new_tokens=256)
+        return saida[0]["generated_text"]
     except:
         return "Não foi possível gerar resposta gratuita."
 
 # -----------------------------
-# Botão Perguntar
+# Processamento
 # -----------------------------
-if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_conteudo and pergunta:
-    if df is not None:
-        resumo = {
-            "tipo_conteudo": tipo_conteudo,
-            "colunas": list(df.columns),
-            "amostra": df.head(10).to_dict(orient="records")
-        }
-        conteudo = limitar_texto(str(resumo))
-    else:
-        conteudo = limitar_texto(texto_extraido)
+if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_planilha:
+    try:
+        if df is not None:
+            resumo = {
+                "tipo_planilha": tipo_planilha,
+                "colunas": list(df.columns),
+                "amostra": df.head(10).to_dict(orient="records"),
+            }
+            conteudo = f"Resumo da planilha:\n{resumo}\nPergunta: {pergunta}"
+        else:
+            conteudo = f"Texto detectado:\n{texto_extraido}\nPergunta: {pergunta}"
 
-    resposta_final = gerar_resposta(conteudo, pergunta)
-    st.subheader("✅ Resposta Detalhada:")
-    st.write(resposta_final)
+        prompt_system = (
+            "Você é um assistente especialista em análise de planilhas, PDFs e textos financeiros em português. "
+            "Responda detalhadamente. Se não houver informação, diga 'Não encontrado'."
+        )
 
-    # Histórico limitado
-    st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta_final})
-    if len(st.session_state["historico"]) > 5:
-        st.session_state["historico"] = st.session_state["historico"][-5:]
+        # Tenta OpenAI GPT-4o-mini
+        try:
+            resposta = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": prompt_system},
+                    {"role": "user", "content": conteudo}
+                ]
+            )
+            texto_completo = resposta.choices[0].message.content.strip()
+        except Exception:
+            # Se falhar, usa Hugging Face
+            texto_completo = gerar_resposta_hf(conteudo)
+
+        # Formata valores para exibição legível
+        texto_completo = formatar_valores_resposta(texto_completo)
+
+        st.subheader("✅ Resposta Detalhada:")
+        st.write(texto_completo)
+        st.session_state["historico"].append({"pergunta": pergunta, "resposta": texto_completo})
+
+    except Exception as e:
+        st.error(f"Erro: {e}")
 
 # -----------------------------
 # Histórico
 # -----------------------------
-st.subheader("📜 Histórico de perguntas recentes")
 if st.session_state["historico"]:
-    for h in reversed(st.session_state["historico"]):
+    st.subheader("📜 Histórico de perguntas recentes")
+    for h in reversed(st.session_state["historico"][-5:]):
         st.markdown(f"**Pergunta:** {h['pergunta']}  \n**Resposta:** {h['resposta']}")
-
-# -----------------------------
-# Botão para limpar histórico
-# -----------------------------
-if st.button("🧹 Limpar histórico"):
-    st.session_state["historico"] = []
-    st.success("🗑 Histórico limpo!")
