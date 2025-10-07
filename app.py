@@ -1,14 +1,12 @@
 import streamlit as st
 import pandas as pd
-from openai import OpenAI
 import matplotlib.pyplot as plt
+from openai import OpenAI
 from PyPDF2 import PdfReader
-from PIL import Image
 import base64
-import io
 
 # -----------------------------
-# CONFIGURAÇÃO INICIAL
+# Inicialização
 # -----------------------------
 st.set_page_config(page_title="IA Leitora de Planilhas Avançada", layout="wide")
 st.title("📊 IA Leitora de Planilhas Avançada - Pontuar Tech")
@@ -16,119 +14,92 @@ st.markdown("1️⃣ Envie uma planilha, PDF ou imagem → 2️⃣ Informe o tip
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-# -----------------------------
-# SESSÃO
-# -----------------------------
 if "historico" not in st.session_state:
     st.session_state["historico"] = []
 
 # -----------------------------
-# UPLOAD
+# Função para extrair conteúdo
+# -----------------------------
+def extrair_conteudo(uploaded_file):
+    nome = uploaded_file.name.lower()
+    tipo = uploaded_file.type
+
+    # Caso 1: Excel
+    if nome.endswith(".xlsx"):
+        df = pd.read_excel(uploaded_file)
+        return df, None
+
+    # Caso 2: PDF
+    elif nome.endswith(".pdf"):
+        try:
+            reader = PdfReader(uploaded_file)
+            texto = ""
+            for page in reader.pages:
+                texto += page.extract_text() or ""
+            return None, texto.strip()
+        except Exception:
+            # fallback com GPT-4o
+            pdf_bytes = uploaded_file.read()
+            base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "user", "content": [
+                        {"type": "text", "text": "Extraia todo o texto deste PDF:"},
+                        {"type": "image_url", "image_url": f"data:application/pdf;base64,{base64_pdf}"}
+                    ]}
+                ]
+            )
+            return None, response.choices[0].message.content
+
+    # Caso 3: Imagem
+    elif any(ext in tipo for ext in ["image/png", "image/jpeg", "image/jpg"]):
+        img_bytes = uploaded_file.read()
+        base64_image = base64.b64encode(img_bytes).decode("utf-8")
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Extraia todo o texto visível desta imagem (OCR):"},
+                    {"type": "image_url", "image_url": f"data:image/png;base64,{base64_image}"}
+                ]}
+            ]
+        )
+        return None, response.choices[0].message.content
+
+    else:
+        return None, None
+
+# -----------------------------
+# Upload
 # -----------------------------
 uploaded_file = st.file_uploader(
     "📂 Envie uma planilha (.xlsx), PDF ou imagem (.png, .jpg)",
     type=["xlsx", "pdf", "png", "jpg", "jpeg"]
 )
 
-# -----------------------------
-# FUNÇÕES AUXILIARES
-# -----------------------------
-def detectar_colunas_avancado(df):
-    keywords = ["gasto", "valor", "custo", "preço", "despesa", "total"]
-    colunas_financeiras = []
-    for col in df.columns:
-        texto = str(col).lower()
-        if any(k in texto for k in keywords) or pd.api.types.is_numeric_dtype(df[col]):
-            colunas_financeiras.append(col)
-    return list(set(colunas_financeiras)), df
-
-
-def extrair_texto_arquivo(file, client):
-    """Extrai texto de PDFs e imagens via GPT-4o (sem Tesseract)."""
-    nome = file.name.lower()
-    tipo = file.type
-
-    # Caso Excel
-    if nome.endswith(".xlsx"):
-        return pd.read_excel(file)
-
-    # Caso PDF (tentativa com PyPDF2, depois GPT)
-    elif "pdf" in tipo or nome.endswith(".pdf"):
-        try:
-            reader = PdfReader(file)
-            texto_pdf = ""
-            for page in reader.pages:
-                texto_pdf += page.extract_text() or ""
-            if texto_pdf.strip():
-                return texto_pdf
-        except Exception:
-            pass  # Vai tentar OCR via GPT
-
-        file.seek(0)
-        pdf_bytes = file.read()
-        base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Extraia todo o texto legível deste PDF em português:"},
-                    {"type": "image_url", "image_url": f"data:application/pdf;base64,{base64_pdf}"}
-                ]}
-            ]
-        )
-        return response.choices[0].message.content
-
-    # Caso imagem (OCR direto com GPT-4o)
-    elif any(ext in tipo for ext in ["image/png", "image/jpeg", "image/jpg"]):
-        img_bytes = file.read()
-        base64_image = base64.b64encode(img_bytes).decode("utf-8")
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Extraia todo o texto desta imagem em português:"},
-                    {"type": "image_url", "image_url": f"data:image/png;base64,{base64_image}"}
-                ]}
-            ]
-        )
-        return response.choices[0].message.content
-
-    else:
-        return None
-
-
-# -----------------------------
-# PROCESSAMENTO DE ARQUIVO
-# -----------------------------
-texto_extraido = None
 df = None
+texto_extraido = None
 
 if uploaded_file:
-    resultado = extrair_texto_arquivo(uploaded_file, client)
-    if isinstance(resultado, pd.DataFrame):
-        df = resultado
+    df, texto_extraido = extrair_conteudo(uploaded_file)
+    if df is not None:
         st.success("✅ Planilha Excel carregada!")
-    elif isinstance(resultado, str):
-        texto_extraido = resultado
+    elif texto_extraido:
         st.success("✅ Texto extraído com sucesso!")
-        st.text_area("🧾 Texto detectado:", texto_extraido[:5000])
     else:
-        st.error("❌ Tipo de arquivo não reconhecido ou vazio.")
+        st.error("❌ Não foi possível processar o arquivo.")
         st.stop()
 
 # -----------------------------
-# TIPO DE CONTEÚDO
+# Entrada do usuário
 # -----------------------------
 tipo_planilha = st.text_input("🗂 Qual o tipo de conteúdo? (ex.: vendas, gastos, notas fiscais...)")
-
-# -----------------------------
-# CAIXA DE PERGUNTA
-# -----------------------------
 pergunta = st.text_input("💬 Sua pergunta:")
 tipo_resposta = st.radio("Tipo de resposta:", ["Resumo simples", "Detalhes adicionais"], index=0)
 
 # -----------------------------
-# PROCESSAMENTO DE PERGUNTA
+# Processamento com GPT
 # -----------------------------
 if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_planilha:
     try:
@@ -145,7 +116,7 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_p
         prompt_system = (
             "Você é um assistente especialista em análise de planilhas, PDFs e textos financeiros em português. "
             "Analise os dados e responda com clareza e precisão. "
-            "Organize a resposta em duas partes: 'Resumo simples' e 'Detalhes adicionais'. "
+            "Organize sua resposta em duas partes: 'Resumo simples' e 'Detalhes adicionais'. "
             "Se algo não for encontrado, diga 'Não encontrado'."
         )
 
@@ -158,7 +129,6 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_p
         )
 
         texto_completo = resposta.choices[0].message.content.strip()
-
         if "Resumo simples:" in texto_completo and "Detalhes adicionais:" in texto_completo:
             resumo_simples = texto_completo.split("Resumo simples:")[1].split("Detalhes adicionais:")[0].strip()
             detalhes = texto_completo.split("Detalhes adicionais:")[1].strip()
@@ -177,7 +147,7 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_p
         st.error(f"Erro: {e}")
 
 # -----------------------------
-# VISUALIZAÇÕES
+# Visualizações
 # -----------------------------
 if df is not None:
     st.subheader("📊 Visualizações básicas")
@@ -195,7 +165,7 @@ if df is not None:
         st.info("Nenhuma coluna numérica detectada.")
 
 # -----------------------------
-# HISTÓRICO
+# Histórico
 # -----------------------------
 if st.session_state["historico"]:
     st.subheader("📜 Histórico de perguntas recentes")
