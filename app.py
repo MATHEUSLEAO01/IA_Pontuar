@@ -1,44 +1,48 @@
 import streamlit as st
 import pandas as pd
-from openai import OpenAI
+import pytesseract
+from PIL import Image
 import pdfplumber
 import camelot
-from PyPDF2 import PdfReader
-from PIL import Image
-import io
-import requests
+from openai import OpenAI
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 
 # -----------------------------
 # Inicialização
 # -----------------------------
-st.set_page_config(page_title="IA Leitora Avançada", layout="wide")
+st.set_page_config(page_title="IA Leitora de Planilhas Avançada", layout="wide")
 st.title("📊 IA Leitora de Planilhas Avançada - Pontuar Tech")
 st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Informe o tipo → 3️⃣ Faça uma pergunta → 4️⃣ Veja a resposta!")
 
-# OpenAI
-client = OpenAI(api_key=st.secrets["general"]["OPENAI_API_KEY"])
+# OpenAI client
+openai_key = st.secrets["general"]["OPENAI_API_KEY"]
+client = OpenAI(api_key=openai_key)
 
+# Hugging Face fallback (Flan-T5)
+@st.cache_resource
+def carregar_modelo_hf():
+    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-large")
+    model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-large")
+    return pipeline("text2text-generation", model=model, tokenizer=tokenizer)
+
+hf_pipeline = carregar_modelo_hf()
+
+# -----------------------------
 # Sessão
+# -----------------------------
 if "historico" not in st.session_state:
     st.session_state["historico"] = []
 
 # -----------------------------
-# Upload de arquivo
+# Upload
 # -----------------------------
-uploaded_file = st.file_uploader("📂 Envie planilha (.xlsx), PDF ou imagem (.png, .jpg, .jpeg)", type=["xlsx","pdf","png","jpg","jpeg"])
+uploaded_file = st.file_uploader(
+    "📂 Envie planilha (.xlsx), PDF ou imagem (.png, .jpg, .jpeg)",
+    type=["xlsx", "pdf", "png", "jpg", "jpeg"]
+)
 
-# Funções auxiliares
-def extrair_tabelas_pdf(file):
-    try:
-        tables = camelot.read_pdf(file, pages="all", flavor="stream")
-        if tables and len(tables) > 0:
-            df = tables[0].df
-            df.columns = df.iloc[0]
-            df = df[1:]
-            return df
-    except Exception:
-        pass
-    return None
+df = None
+texto_extraido = None
 
 def extrair_texto_pdf(file):
     texto = ""
@@ -47,31 +51,21 @@ def extrair_texto_pdf(file):
             texto += page.extract_text() or ""
     return texto
 
-def extrair_texto_imagem(file):
-    """Usa OpenAI para OCR (gratuito)"""
-    # Converter imagem para bytes
-    imagem = Image.open(file)
-    buf = io.BytesIO()
-    imagem.save(buf, format="PNG")
-    buf.seek(0)
-    
-    # Fallback gratuito via OCR.Space API
-    # OBS: pode usar qualquer serviço OCR gratuito se quiser
-    payload = {"apikey": "helloworld", "language": "por"}
-    files = {"file": buf}
+def extrair_tabelas_pdf(file):
     try:
-        r = requests.post("https://api.ocr.space/parse/image", data=payload, files=files)
-        result = r.json()
-        texto = result.get("ParsedResults")[0]["ParsedText"]
-        return texto
+        tables = camelot.read_pdf(file, pages="all", flavor="stream")
+        if tables and len(tables) > 0:
+            df = tables[0].df
+            df.columns = df.iloc[0]
+            df = df[1:]
+            return df
     except:
-        return "Não foi possível extrair texto da imagem."
+        return None
+    return None
 
-# -----------------------------
-# Processamento
-# -----------------------------
-df = None
-texto_extraido = None
+def extrair_texto_imagem(file):
+    imagem = Image.open(file)
+    return pytesseract.image_to_string(imagem, lang="por")
 
 if uploaded_file:
     nome = uploaded_file.name.lower()
@@ -82,77 +76,75 @@ if uploaded_file:
         elif nome.endswith(".pdf"):
             df = extrair_tabelas_pdf(uploaded_file)
             if df is not None:
-                st.success("✅ Tabela detectada e carregada do PDF!")
+                st.success("✅ Tabela detectada no PDF!")
             else:
                 texto_extraido = extrair_texto_pdf(uploaded_file)
                 st.info("📄 Nenhuma tabela detectada — texto extraído para análise.")
-        elif nome.endswith((".png","jpg","jpeg")):
+        elif nome.endswith((".png", ".jpg", ".jpeg")):
             texto_extraido = extrair_texto_imagem(uploaded_file)
             st.success("✅ Texto extraído da imagem!")
     except Exception as e:
-        st.error(f"❌ Erro ao processar: {e}")
+        st.error(f"❌ Erro ao processar arquivo: {e}")
         st.stop()
 
-# Tipo de conteúdo
-tipo_planilha = st.text_input("🗂 Qual o tipo de conteúdo? (ex.: vendas, gastos, notas fiscais...)")
-
-# Pergunta
+# -----------------------------
+# Tipo de conteúdo e pergunta
+# -----------------------------
+tipo_conteudo = st.text_input("🗂 Qual o tipo de conteúdo? (ex.: vendas, gastos, estoque...)")
 pergunta = st.text_input("💬 Sua pergunta:")
 
 # -----------------------------
-# Processamento da pergunta
+# Função para gerar resposta detalhada
 # -----------------------------
 def gerar_resposta_openai(conteudo):
-    prompt = (
-        "Você é um assistente especialista em análise de planilhas, PDFs e textos financeiros em português. "
-        "Responda detalhadamente. Se não encontrar a informação, diga 'Não encontrado'."
-    )
     try:
-        resp = client.chat.completions.create(
+        prompt_system = (
+            "Você é um assistente especialista em análise de planilhas, PDFs e textos financeiros em português. "
+            "Forneça sempre uma resposta detalhada e precisa, sem resumo simples. "
+            "Se não encontrar dados suficientes, diga 'Não encontrado'."
+        )
+        resposta = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": prompt},
+                {"role": "system", "content": prompt_system},
                 {"role": "user", "content": conteudo}
             ]
         )
-        return resp.choices[0].message.content.strip()
+        return resposta.choices[0].message.content.strip()
     except Exception as e:
         return None
 
-def gerar_resposta_gratuita(conteudo):
-    # Fallback gratuito usando API HuggingFace GPT2 simples
+def gerar_resposta_hf(texto):
     try:
-        r = requests.post(
-            "https://api-inference.huggingface.co/models/tiiuae/falcon-7b-instruct",
-            headers={"Authorization": "Bearer hf_demo"},
-            json={"inputs": conteudo}
-        )
-        result = r.json()
-        if isinstance(result, list):
-            return result[0]["generated_text"]
-        elif "error" in result:
-            return "Não foi possível gerar resposta gratuita."
+        saida = hf_pipeline(f"Responda detalhadamente: {texto}", max_length=1024)
+        return saida[0]["generated_text"]
     except:
-        return "Não foi possível gerar resposta gratuita."
-    return "Não encontrado."
+        return None
 
-if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_planilha and pergunta:
+# -----------------------------
+# Processamento
+# -----------------------------
+if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_conteudo and pergunta:
+    conteudo = ""
     if df is not None:
-        resumo = {
-            "tipo_planilha": tipo_planilha,
-            "colunas": list(df.columns),
-            "amostra": df.head(10).to_dict(orient="records"),
-        }
-        conteudo = f"Resumo da planilha:\n{resumo}\nPergunta: {pergunta}"
+        df_preview = df.head(10).to_dict(orient="records")
+        conteudo = f"Tipo: {tipo_conteudo}\nDados:\n{df_preview}\nPergunta: {pergunta}"
     else:
-        conteudo = f"Texto detectado:\n{texto_extraido}\nPergunta: {pergunta}"
-    
+        conteudo = f"Tipo: {tipo_conteudo}\nTexto extraído:\n{texto_extraido}\nPergunta: {pergunta}"
+
+    # Tenta OpenAI
     resposta = gerar_resposta_openai(conteudo)
     if not resposta:
-        resposta = gerar_resposta_gratuita(conteudo)
+        # fallback HF gratuito
+        resposta = gerar_resposta_hf(conteudo)
     
+    if not resposta:
+        resposta = "❌ Não foi possível gerar resposta gratuita."
+
     st.subheader("✅ Resposta Detalhada:")
     st.write(resposta)
+
+    # Histórico
     st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta})
 
 # -----------------------------
