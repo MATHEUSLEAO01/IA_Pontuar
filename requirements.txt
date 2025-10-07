@@ -11,4 +11,4 @@ torch
 fuzzywuzzy[speedup]
 opencv-python-headless
 
-pip install google-cloud-vision
+pip istall google-cloud-vision
