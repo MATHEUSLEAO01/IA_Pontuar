@@ -5,17 +5,23 @@ import pdfplumber
 from PIL import Image
 import pytesseract
 import camelot
+from PyPDF2 import PdfReader
+import io
 import re
+from transformers import pipeline
 
 # -----------------------------
 # Inicialização
 # -----------------------------
 st.set_page_config(page_title="IA Leitora de Planilhas Avançada", layout="wide")
 st.title("📊 IA Leitora de Planilhas Avançada - Pontuar Tech")
-st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Informe o tipo → 3️⃣ Faça uma pergunta → 4️⃣ Veja a resposta!")
+st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Faça uma pergunta → 3️⃣ Veja a resposta!")
 
 # OpenAI
 client = OpenAI(api_key=st.secrets["general"]["OPENAI_API_KEY"])
+
+# Hugging Face como fallback gratuito
+hf_pipeline = pipeline("text-generation", model="bigscience/bloom-560m", device=-1)  # CPU
 
 # -----------------------------
 # Sessão
@@ -60,13 +66,36 @@ def extrair_texto_imagem(file):
     imagem = Image.open(file)
     return pytesseract.image_to_string(imagem, lang="por")
 
-def extrair_valores_legiveis(texto):
-    """Encontra valores no texto e retorna como lista legível"""
-    # Regex para valores R$ ou apenas números com vírgula
-    valores = re.findall(r"R?\$?\s*\d{1,3}(?:,\d{2})?", texto)
-    # Remove duplicados e espaços
-    valores = [v.replace("R$", "").strip() for v in valores]
-    return ", ".join(valores) if valores else "Nenhum valor encontrado"
+def gerar_resposta_hf(conteudo):
+    try:
+        if len(conteudo) > 1000:  # limitar para não travar o modelo
+            conteudo = conteudo[-1000:]
+        saida = hf_pipeline(f"Responda detalhadamente: {conteudo}", max_new_tokens=256)
+        return saida[0]["generated_text"]
+    except:
+        return "Não foi possível gerar resposta gratuita."
+
+def extrair_valores_item(texto, item):
+    """
+    Extrai valores associados a um item específico na tabela ou texto.
+    Retorna valores com R$ e legíveis.
+    """
+    texto = texto.upper()
+    item = item.upper()
+
+    # Procura linhas que contenham o item
+    linhas = texto.split("\n")
+    valores_item = []
+    for linha in linhas:
+        if item in linha:
+            # Regex para valores tipo 10,50 ou R 10,50
+            encontrados = re.findall(r"R?\$?\s*\d{1,3}(?:,\d{2})?", linha)
+            for v in encontrados:
+                v_clean = v.replace("R$", "").replace("R", "").strip()
+                valores_item.append(f"R$ {v_clean}")
+    if not valores_item:
+        return "Nenhum valor encontrado para este item."
+    return ", ".join(valores_item)
 
 # -----------------------------
 # Processamento de arquivo
@@ -100,37 +129,23 @@ if uploaded_file:
 pergunta = st.text_input("💬 Sua pergunta:")
 
 # -----------------------------
-# Botão limpar histórico
-# -----------------------------
-if st.button("🧹 Limpar histórico"):
-    st.session_state["historico"] = []
-    st.success("Histórico limpo!")
-
-# -----------------------------
 # Processamento
 # -----------------------------
-if st.button("🔍 Perguntar") and (df is not None or texto_extraido):
+if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and pergunta:
     try:
-        # Cria conteúdo resumido
+        item = pergunta  # usa a pergunta como filtro
+
         if df is not None:
-            # pega apenas primeiras 5 linhas e colunas para não sobrecarregar
-            conteudo = f"Colunas: {list(df.columns)}\nAmostra: {df.head(5).to_dict(orient='records')}\nPergunta: {pergunta}"
             texto_para_extrair_valores = df.to_string()
         else:
-            # pega só os primeiros 1000 caracteres do texto
-            conteudo = f"Texto detectado:\n{texto_extraido[:1000]}\nPergunta: {pergunta}"
             texto_para_extrair_valores = texto_extraido
 
-        # Extrai valores de forma legível
-        valores_legiveis = extrair_valores_legiveis(texto_para_extrair_valores)
-
-        # Monta resposta clara
-        resposta = f"💰 Valores encontrados relacionados à sua pergunta:\n{valores_legiveis}"
+        resposta = extrair_valores_item(texto_para_extrair_valores, item)
 
         st.subheader("✅ Resposta Detalhada:")
         st.write(resposta)
 
-        # Mantém histórico limitado a 3
+        # Atualiza histórico limitado a 3
         st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta})
         if len(st.session_state["historico"]) > 3:
             st.session_state["historico"] = st.session_state["historico"][-3:]
@@ -145,3 +160,10 @@ if st.session_state["historico"]:
     st.subheader("📜 Histórico de perguntas recentes")
     for h in reversed(st.session_state["historico"]):
         st.markdown(f"**Pergunta:** {h['pergunta']}  \n**Resposta:** {h['resposta']}")
+
+# -----------------------------
+# Botão para limpar histórico
+# -----------------------------
+if st.button("🗑 Limpar histórico"):
+    st.session_state["historico"] = []
+    st.success("Histórico limpo!")
