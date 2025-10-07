@@ -8,3 +8,4 @@ Pillow
 camelot-py[cv]
 transformers
 torch
+fuzzywuzzy[speedup]
