@@ -2,42 +2,28 @@ import streamlit as st
 from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
 import re
-from io import BytesIO
 import pandas as pd
-import cv2
-import numpy as np
 
 # --- Função de pré-processamento da imagem ---
 def pre_processar_imagem(img_file):
-    # abre imagem PIL
-    img = Image.open(img_file).convert("RGB")
-    # converte para array OpenCV
-    img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-    # converte para grayscale
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-    # aplica CLAHE (melhora contraste local)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    gray = clahe.apply(gray)
-    # suavização leve
-    blur = cv2.GaussianBlur(gray, (3,3), 0)
-    # binarização Otsu
-    _, binary = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    # converte de volta para PIL
-    pil_img = Image.fromarray(binary)
-    return pil_img
+    img = Image.open(img_file).convert("L")  # grayscale
+    img = img.filter(ImageFilter.MedianFilter())  # remover ruído
+    img = ImageEnhance.Contrast(img).enhance(2)  # aumentar contraste
+    img = img.point(lambda x: 0 if x < 140 else 255, '1')  # binarização
+    return img
 
-# --- Função para extrair valores do texto OCR ---
-def extrair_valores(texto):
-    texto = re.sub(r"\s+", "", texto)
-    # regex para capturar valores monetários (R$ 12,34 ou 12,34)
-    valores = re.findall(r"R?\$?\s?(\d{1,3}(?:\.\d{3})*,\d{2})|(\d+,\d{2})", texto)
-    # normaliza
-    lista_valores = []
+# --- Função para extrair valores monetários de forma robusta ---
+def extrair_valores_descritivo(texto):
+    texto = texto.replace("\n", " ").replace(" ", "")
+    # regex para capturar fragmentos de valores monetários
+    fragmentos = re.findall(r"(\d+)[,|\.](\d{2})", texto)
+    valores = [f"R$ {x[0]},{x[1]}" for x in fragmentos]
+    # remove duplicados mantendo ordem
+    valores_unicos = []
     for v in valores:
-        v_str = v[0] if v[0] else v[1]
-        v_str = v_str.replace(".", "")
-        lista_valores.append(f"R$ {v_str}")
-    return lista_valores
+        if v not in valores_unicos:
+            valores_unicos.append(v)
+    return valores_unicos
 
 # --- Histórico de perguntas (máx. 3) ---
 if "historico" not in st.session_state:
@@ -61,7 +47,7 @@ if st.button("🔍 Consultar") and uploaded_file and pergunta:
     if uploaded_file.type in ["image/png", "image/jpeg", "image/jpg"]:
         img = pre_processar_imagem(uploaded_file)
         texto = pytesseract.image_to_string(img, lang="por")
-        valores = extrair_valores(texto)
+        valores = extrair_valores_descritivo(texto)
         if valores:
             resposta = f"💰 Valores encontrados: {', '.join(valores)}"
         else:
@@ -83,13 +69,15 @@ if st.button("🔍 Consultar") and uploaded_file and pergunta:
                 valores = []
                 for col in df_filtrado.columns:
                     for val in df_filtrado[col]:
-                        val_str = str(val)
-                        # pega números
-                        match = re.match(r"\d+([.,]\d+)?", val_str)
-                        if match:
-                            val_str = val_str.replace(".", "").replace(",", ".")
+                        val_str = str(val).replace(",", ".")
+                        if re.match(r"^\d+(\.\d+)?$", val_str):
                             valores.append(f"R$ {float(val_str):.2f}".replace(".", ","))
-                resposta = f"💰 Valores encontrados: {', '.join(valores)}"
+                if valores:
+                    # remove duplicados
+                    valores = list(dict.fromkeys(valores))
+                    resposta = f"💰 Valores encontrados: {', '.join(valores)}"
+                else:
+                    resposta = "❌ Nenhum valor encontrado para este item."
             else:
                 resposta = "❌ Nenhum valor encontrado para este item."
         except Exception as e:
