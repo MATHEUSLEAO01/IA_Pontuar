@@ -1,6 +1,5 @@
 streamlit
 openai
-pandas
-matplotlib
 PyPDF2
-Pillow
+pandas
+requests
