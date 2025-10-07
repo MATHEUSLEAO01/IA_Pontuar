@@ -5,7 +5,6 @@ from openai import OpenAI
 from PyPDF2 import PdfReader
 import base64
 import time
-from openai.error import RateLimitError
 
 # -----------------------------
 # Inicialização
@@ -64,16 +63,16 @@ def extrair_conteudo(uploaded_file):
                 texto += page.extract_text() or ""
             if texto.strip():
                 return None, texto
+            else:
+                return None, "[PDF sem texto detectável]"
         except:
-            uploaded_file.seek(0)
-            pdf_bytes = uploaded_file.read()
-            base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-            return None, f"[PDF Base64] {base64_pdf[:500]}..."  # Apenas preview
+            return None, "[Erro ao ler PDF]"
+
     # Imagem
     elif any(ext in tipo for ext in ["image/png", "image/jpeg", "image/jpg"]):
         img_bytes = uploaded_file.read()
         base64_img = base64.b64encode(img_bytes).decode("utf-8")
-        return None, f"[Imagem Base64] {base64_img[:500]}..."  # Apenas preview
+        return None, f"[Imagem Base64 Preview] {base64_img[:500]}..."
     else:
         return None, None
 
@@ -113,12 +112,17 @@ def chamar_gpt(conteudo, max_retries=3):
                 ]
             )
             return resposta.choices[0].message.content.strip()
-        except RateLimitError:
-            if attempt < max_retries - 1:
-                st.warning("⚠️ Limite da API atingido. Tentando novamente em 5s...")
-                time.sleep(5)
+        except Exception as e:
+            # Detecta RateLimit pelo texto da exceção
+            if "RateLimit" in str(e):
+                if attempt < max_retries - 1:
+                    st.warning("⚠️ Limite da API atingido. Tentando novamente em 5s...")
+                    time.sleep(5)
+                else:
+                    st.error("❌ Limite da API atingido. Tente mais tarde.")
+                    st.stop()
             else:
-                st.error("❌ Limite da API atingido. Tente mais tarde.")
+                st.error(f"Erro na API: {e}")
                 st.stop()
 
 # -----------------------------
