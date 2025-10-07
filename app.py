@@ -5,21 +5,19 @@ import pdfplumber
 from PIL import Image
 import pytesseract
 import camelot
-import re
-from transformers import pipeline
 
 # -----------------------------
 # Inicialização
 # -----------------------------
-st.set_page_config(page_title="IA Leitora de Estoque Avançada", layout="wide")
-st.title("📊 IA Leitora de Estoque Avançada - Pontuar Tech")
-st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Faça uma pergunta sobre itens ou valores → 3️⃣ Veja a resposta!")
+st.set_page_config(page_title="IA Leitora de Planilhas Avançada", layout="wide")
+st.title("📊 IA Leitora de Planilhas Avançada - Pontuar Tech")
+st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Faça uma pergunta → 3️⃣ Veja a resposta!")
 
 # OpenAI
 client = OpenAI(api_key=st.secrets["general"]["OPENAI_API_KEY"])
 
-# Hugging Face como fallback gratuito
-hf_pipeline = pipeline("text-generation", model="bigscience/bloom-560m", device=-1)  # CPU
+# Hugging Face (não inicializa aqui para evitar travamento CPU)
+hf_pipeline = None
 
 # -----------------------------
 # Sessão
@@ -64,32 +62,6 @@ def extrair_texto_imagem(file):
     imagem = Image.open(file)
     return pytesseract.image_to_string(imagem, lang="por")
 
-def gerar_resposta_hf(conteudo):
-    try:
-        if len(conteudo) > 1000:
-            conteudo = conteudo[-1000:]
-        saida = hf_pipeline(f"Responda detalhadamente: {conteudo}", max_new_tokens=256)
-        return saida[0]["generated_text"]
-    except:
-        return "Não foi possível gerar resposta gratuita."
-
-def extrair_valores_itens(texto):
-    """
-    Limpa o texto e extrai todos os produtos e valores monetários de forma legível.
-    Exemplo de saída: "Produto X → R$ 10,85"
-    """
-    texto = re.sub(r'\s+', ' ', texto)
-    partes = re.split(r'(R\s?\d+,\d{2})', texto)
-    resultado = []
-    for i in range(1, len(partes), 2):
-        valor = partes[i].strip()
-        descricao = partes[i-1].strip()
-        if descricao:
-            resultado.append(f"{descricao} → R$ {valor.replace('R','').strip()}")
-    if not resultado:
-        return "Não encontrado"
-    return "\n".join(resultado)
-
 # -----------------------------
 # Processamento de arquivo
 # -----------------------------
@@ -119,31 +91,50 @@ if uploaded_file:
 # -----------------------------
 # Caixa de pergunta
 # -----------------------------
-pergunta = st.text_input("💬 Sua pergunta sobre itens ou valores:")
+pergunta = st.text_input("💬 Sua pergunta:")
 
 # -----------------------------
-# Botão limpar histórico
+# Função para gerar resposta Hugging Face sob demanda
 # -----------------------------
-if st.button("🗑 Limpar histórico"):
+def gerar_resposta_hf(conteudo):
+    global hf_pipeline
+    try:
+        if hf_pipeline is None:
+            from transformers import pipeline
+            hf_pipeline = pipeline("text-generation", model="distilgpt2", device=-1)  # modelo leve CPU
+        if len(conteudo) > 1000:
+            conteudo = conteudo[-1000:]
+        saida = hf_pipeline(f"Responda detalhadamente: {conteudo}", max_new_tokens=256)
+        return saida[0]["generated_text"]
+    except:
+        return "Não foi possível gerar resposta gratuita."
+
+# -----------------------------
+# Função para limpar histórico
+# -----------------------------
+if st.button("🧹 Limpar Histórico"):
     st.session_state["historico"] = []
 
 # -----------------------------
-# Processamento
+# Processamento da pergunta
 # -----------------------------
-if st.button("🔍 Perguntar") and (df is not None or texto_extraido):
+if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and pergunta:
     try:
+        # Monta conteúdo para análise
         if df is not None:
             resumo = {
                 "colunas": list(df.columns),
-                "amostra": df.head(10).to_dict(orient="records"),
+                "amostra": df.head(10).to_dict(orient="records")
             }
             conteudo = f"Resumo da planilha:\n{resumo}\nPergunta: {pergunta}"
         else:
             conteudo = f"Texto detectado:\n{texto_extraido}\nPergunta: {pergunta}"
 
         prompt_system = (
-            "Você é um assistente especialista em análise de planilhas, PDFs e textos em português. "
-            "Responda detalhadamente e de forma legível. Se a pergunta envolver valores, organize os produtos e preços claramente."
+            "Você é um assistente especialista em análise de planilhas, PDFs e textos financeiros em português. "
+            "Responda detalhadamente. "
+            "Se houver valores monetários, organize-os de forma legível para o usuário. "
+            "Se não houver informação, diga 'Não encontrado'."
         )
 
         # Tenta OpenAI GPT-4o-mini
@@ -157,16 +148,13 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido):
             )
             texto_completo = resposta.choices[0].message.content.strip()
         except Exception:
+            # Se falhar, usa Hugging Face sob demanda
             texto_completo = gerar_resposta_hf(conteudo)
 
-        # Se a pergunta for sobre valores, limpa e deixa legível
-        if any(palavra in pergunta.lower() for palavra in ["valor", "preço", "quanto"]):
-            texto_completo = extrair_valores_itens(texto_completo)
-
         st.subheader("✅ Resposta Detalhada:")
-        st.text(texto_completo)
+        st.write(texto_completo)
 
-        # Histórico limitado a 3 entradas
+        # Salva histórico (máx 3 entradas)
         st.session_state["historico"].append({"pergunta": pergunta, "resposta": texto_completo})
         if len(st.session_state["historico"]) > 3:
             st.session_state["historico"] = st.session_state["historico"][-3:]
@@ -180,4 +168,4 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido):
 if st.session_state["historico"]:
     st.subheader("📜 Histórico de perguntas recentes")
     for h in reversed(st.session_state["historico"]):
-        st.markdown(f"**Pergunta:** {h['pergunta']}  \n**Resposta:**\n{h['resposta']}")
+        st.markdown(f"**Pergunta:** {h['pergunta']}  \n**Resposta:** {h['resposta']}")
