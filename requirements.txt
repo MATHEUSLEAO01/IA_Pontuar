@@ -1,9 +1,10 @@
 streamlit
 pandas
 openai
+PyPDF2
 pdfplumber
-camelot-py[cv]
 pytesseract
 Pillow
+camelot-py[cv]
 transformers
 torch
