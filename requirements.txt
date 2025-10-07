@@ -5,6 +5,5 @@ pdfplumber
 camelot-py[cv]
 pytesseract
 Pillow
-matplotlib
 transformers
 torch
