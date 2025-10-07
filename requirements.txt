@@ -9,3 +9,4 @@ camelot-py[cv]
 transformers
 torch
 fuzzywuzzy[speedup]
+opencv-python-headless
