@@ -6,23 +6,6 @@ import pandas as pd
 import numpy as np
 import cv2
 from fuzzywuzzy import fuzz, process
-from google.cloud import vision
-from google.oauth2 import service_account
-import io
-
-# ============================================================
-# 🔐 Autenticação com Google Vision
-# ============================================================
-client = None
-try:
-    credentials = service_account.Credentials.from_service_account_info(
-        st.secrets["google_vision"]
-    )
-    client = vision.ImageAnnotatorClient(credentials=credentials)
-    st.info("✅ Google Vision autenticado com sucesso!")
-except Exception:
-    st.warning("⚠️ Falha ao carregar Google Vision, usando fallback Tesseract.")
-    client = None
 
 # ============================================================
 # 🧹 Função de pré-processamento da imagem
@@ -39,43 +22,40 @@ def pre_processar_imagem(img_file):
     return thresh
 
 # ============================================================
-# 🧾 OCR - Usando Google Vision ou Tesseract
+# 🧾 OCR com Tesseract
 # ============================================================
 def extrair_texto(img_file):
-    try:
-        if client:
-            image_bytes = img_file.read()
-            image = vision.Image(content=image_bytes)
-            response = client.text_detection(image=image)
-            texts = response.text_annotations
-            texto = texts[0].description if texts else ""
-        else:
-            img_cv = pre_processar_imagem(img_file)
-            texto = pytesseract.image_to_string(img_cv, lang="por")
-
-        texto = texto.replace("\n", " ").replace("\r", " ")
-        texto = re.sub(r"\s+", " ", texto)
-        texto = re.sub(r"R\s*\$", "R$", texto)
-        return texto.strip()
-    except Exception as e:
-        st.error(f"Erro ao processar OCR: {e}")
-        return ""
+    img_cv = pre_processar_imagem(img_file)
+    # Usar --psm 6 para detectar blocos de texto
+    texto = pytesseract.image_to_string(img_cv, lang="por", config="--psm 6")
+    texto = texto.replace("\n", " ").replace("\r", " ")
+    texto = re.sub(r"\s+", " ", texto)
+    texto = re.sub(r"R\s*\$", "R$", texto)
+    return texto.strip()
 
 # ============================================================
-# 💰 Função para extrair valores monetários próximos de uma palavra
+# 💰 Extrair valores próximos à palavra usando fuzzy matching
 # ============================================================
-def extrair_valor_por_item(texto, item):
-    linhas = re.split(r'\.|\n', texto)
+def extrair_valor_por_item_fuzzy(texto, item):
+    # Separar em palavras para comparação
+    palavras = texto.split()
     valores_encontrados = []
-    for linha in linhas:
-        if item.lower() in linha.lower():
-            valores = re.findall(r'R?\$?\s*\d+[.,]\d+', linha)
-            valores_encontrados.extend([v.replace(" ", "").replace("R$", "R$ ") for v in valores])
+    for i, palavra in enumerate(palavras):
+        # Fuzzy match da palavra
+        score = fuzz.partial_ratio(item.lower(), palavra.lower())
+        if score >= 70:  # Ajuste de precisão
+            # Procurar números próximos (antes ou depois)
+            vizinhos = palavras[max(i-3,0): i+4]  # 3 palavras antes e 3 depois
+            for v in vizinhos:
+                match = re.search(r'R?\$?\s*\d+[.,]\d+', v)
+                if match:
+                    valor = match.group().replace(" ", "").replace("R$", "R$ ")
+                    valores_encontrados.append(valor)
     # Remover duplicados
     return list(dict.fromkeys(valores_encontrados))
 
 # ============================================================
-# 📜 Histórico de perguntas e respostas (máx. 3)
+# 📜 Histórico de perguntas e respostas
 # ============================================================
 if "historico" not in st.session_state:
     st.session_state["historico"] = []
@@ -101,7 +81,7 @@ if st.button("🔍 Consultar") and uploaded_file and item:
     # === Se for imagem ===
     if uploaded_file.type in ["image/png", "image/jpeg", "image/jpg"]:
         texto = extrair_texto(uploaded_file)
-        valores = extrair_valor_por_item(texto, item)
+        valores = extrair_valor_por_item_fuzzy(texto, item)
         if valores:
             resposta = f"💰 Valores encontrados para '{item}': {', '.join(valores)}"
         else:
