@@ -171,13 +171,15 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_c
     st.subheader("✅ Resposta Detalhada:")
     st.write(resposta_final)
     
-    # Histórico limitado
+    # -----------------------------
+    # Atualiza histórico
+    # -----------------------------
     st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta_final})
     if len(st.session_state["historico"]) > 5:
         st.session_state["historico"] = st.session_state["historico"][-5:]
 
 # -----------------------------
-# Histórico
+# Exibe histórico
 # -----------------------------
 if st.session_state["historico"]:
     st.subheader("📜 Histórico de perguntas recentes")
