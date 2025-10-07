@@ -20,7 +20,7 @@ try:
     )
     client = vision.ImageAnnotatorClient(credentials=credentials)
     st.info("✅ Google Vision autenticado com sucesso!")
-except Exception as e:
+except Exception:
     st.warning("⚠️ Falha ao carregar Google Vision, usando fallback Tesseract.")
     client = None
 
@@ -42,25 +42,27 @@ def pre_processar_imagem(img_file):
 # 🧾 OCR - Usando Google Vision ou Tesseract
 # ============================================================
 def extrair_texto(img_file):
-    if client:
-        # Usa Google Vision API
-        image_bytes = img_file.read()
-        image = vision.Image(content=image_bytes)
-        response = client.text_detection(image=image)
-        texts = response.text_annotations
-        if texts:
-            texto = texts[0].description
+    try:
+        if client:
+            image_bytes = img_file.read()
+            image = vision.Image(content=image_bytes)
+            response = client.text_detection(image=image)
+            texts = response.text_annotations
+            if texts:
+                texto = texts[0].description
+            else:
+                texto = ""
         else:
-            texto = ""
-    else:
-        # Fallback: Tesseract
-        img_cv = pre_processar_imagem(img_file)
-        texto = pytesseract.image_to_string(img_cv, lang="por")
+            img_cv = pre_processar_imagem(img_file)
+            texto = pytesseract.image_to_string(img_cv, lang="por")
 
-    texto = texto.replace("\n", " ").replace("\r", " ")
-    texto = re.sub(r"\s+", " ", texto)
-    texto = re.sub(r"R\s*\$", "R$", texto)
-    return texto.strip()
+        texto = texto.replace("\n", " ").replace("\r", " ")
+        texto = re.sub(r"\s+", " ", texto)
+        texto = re.sub(r"R\s*\$", "R$", texto)
+        return texto.strip()
+    except Exception as e:
+        st.error(f"Erro ao processar OCR: {e}")
+        return ""
 
 # ============================================================
 # 💰 Função para extrair valores monetários
@@ -78,15 +80,16 @@ def extrair_valores(texto):
     return final
 
 # ============================================================
-# 📜 Histórico de perguntas e respostas
+# 📜 Histórico de perguntas e respostas (máx. 3)
 # ============================================================
 if "historico" not in st.session_state:
     st.session_state["historico"] = []
 
 def adicionar_historico(pergunta, resposta):
     st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta})
-    if len(st.session_state["historico"]) > 5:
-        st.session_state["historico"] = st.session_state["historico"][-5:]
+    # Mantém apenas as últimas 3 perguntas
+    if len(st.session_state["historico"]) > 3:
+        st.session_state["historico"] = st.session_state["historico"][-3:]
 
 # ============================================================
 # 💻 Layout principal
@@ -145,7 +148,7 @@ if st.button("🔍 Consultar") and uploaded_file and pergunta:
     st.success(resposta)
 
 # ============================================================
-# 🕓 Histórico das últimas perguntas
+# 🕓 Histórico (máx. 3)
 # ============================================================
 st.subheader("📜 Histórico das últimas perguntas")
 for item in reversed(st.session_state["historico"]):
