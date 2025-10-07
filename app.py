@@ -1,22 +1,24 @@
 import streamlit as st
 import pandas as pd
 from openai import OpenAI
-from PyPDF2 import PdfReader
-import base64
-import time
-import requests
+import pdfplumber
+import pytesseract
+from PIL import Image
+import camelot
 
 # -----------------------------
 # Inicialização
 # -----------------------------
-st.set_page_config(page_title="IA Leitora Avançada", layout="wide")
-st.title("📊 IA Leitora de Conteúdos com Fallback")
-st.markdown(
-    "1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Informe o tipo → 3️⃣ Faça uma pergunta → 4️⃣ Veja a resposta detalhada!"
-)
+st.set_page_config(page_title="IA Leitora de Conteúdos", layout="wide")
+st.title("📊 IA Leitora de Planilhas, PDFs e Imagens")
+st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Informe o tipo → 3️⃣ Faça uma pergunta → 4️⃣ Veja a resposta!")
 
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+# Conexão OpenAI
+client = OpenAI(api_key=st.secrets["general"]["OPENAI_API_KEY"])
 
+# -----------------------------
+# Sessão
+# -----------------------------
 if "historico" not in st.session_state:
     st.session_state["historico"] = []
 
@@ -24,147 +26,119 @@ if "historico" not in st.session_state:
 # Upload
 # -----------------------------
 uploaded_file = st.file_uploader(
-    "📂 Envie planilha (.xlsx), PDF ou imagem (.png, .jpg)",
+    "📂 Envie planilha (.xlsx), PDF ou imagem (.png, .jpg, .jpeg)",
     type=["xlsx", "pdf", "png", "jpg", "jpeg"]
 )
-
-df = None
-texto_extraido = None
 
 # -----------------------------
 # Funções auxiliares
 # -----------------------------
-def dividir_texto(texto, max_chars=3000):
-    partes = []
-    while len(texto) > max_chars:
-        split_index = texto.rfind("\n", 0, max_chars)
-        if split_index == -1:
-            split_index = max_chars
-        partes.append(texto[:split_index])
-        texto = texto[split_index:]
-    partes.append(texto)
-    return partes
+def extrair_texto_pdf(file):
+    texto = ""
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            texto += page.extract_text() or ""
+    return texto
 
-def extrair_conteudo(uploaded_file):
-    nome = uploaded_file.name.lower()
-    tipo = uploaded_file.type
-    # Excel
-    if nome.endswith(".xlsx"):
-        return pd.read_excel(uploaded_file), None
-    # PDF
-    elif nome.endswith(".pdf"):
-        try:
-            reader = PdfReader(uploaded_file)
-            texto = ""
-            for page in reader.pages:
-                texto += page.extract_text() or ""
-            if texto.strip():
-                return None, texto
-            else:
-                return None, "[PDF sem texto detectável]"
-        except:
-            return None, "[Erro ao ler PDF]"
-    # Imagem
-    elif any(ext in tipo for ext in ["image/png", "image/jpeg", "image/jpg"]):
-        img_bytes = uploaded_file.read()
-        base64_img = base64.b64encode(img_bytes).decode("utf-8")
-        return None, f"[Imagem Base64 Preview] {base64_img[:500]}..."
-    else:
-        return None, None
+def extrair_tabelas_pdf(file):
+    try:
+        tables = camelot.read_pdf(file, pages="all", flavor="stream")
+        if tables and len(tables) > 0:
+            df = tables[0].df
+            df.columns = df.iloc[0]
+            df = df[1:]
+            return df
+    except:
+        pass
+    return None
+
+def extrair_texto_imagem(file):
+    imagem = Image.open(file)
+    return pytesseract.image_to_string(imagem, lang="por")
+
+# -----------------------------
+# Processamento de arquivo
+# -----------------------------
+df = None
+texto_extraido = None
 
 if uploaded_file:
-    df, texto_extraido = extrair_conteudo(uploaded_file)
-    if df is not None:
-        st.success("✅ Planilha Excel carregada!")
-    elif texto_extraido:
-        st.success("✅ Texto extraído (preview)!")
-        st.text_area("🧾 Preview do texto:", texto_extraido[:2000])
-    else:
-        st.error("❌ Não foi possível processar o arquivo.")
+    nome = uploaded_file.name.lower()
+    try:
+        if nome.endswith(".xlsx"):
+            df = pd.read_excel(uploaded_file)
+            st.success("✅ Planilha Excel carregada!")
+        elif nome.endswith(".pdf"):
+            df = extrair_tabelas_pdf(uploaded_file)
+            if df is not None:
+                st.success("✅ Tabela detectada e carregada do PDF!")
+            else:
+                texto_extraido = extrair_texto_pdf(uploaded_file)
+                st.info("📄 Nenhuma tabela detectada — texto extraído para análise.")
+        elif nome.endswith((".png", ".jpg", ".jpeg")):
+            texto_extraido = extrair_texto_imagem(uploaded_file)
+            st.success("✅ Texto extraído da imagem!")
+    except Exception as e:
+        st.error(f"❌ Erro ao processar: {e}")
         st.stop()
 
 # -----------------------------
-# Inputs do usuário
+# Tipo de conteúdo
 # -----------------------------
-tipo_planilha = st.text_input("🗂 Tipo de conteúdo (ex.: vendas, gastos, notas fiscais...)")
-pergunta = st.text_input("💬 Sua pergunta detalhada:")
+tipo_conteudo = st.text_input("🗂 Qual o tipo de conteúdo? (ex.: vendas, gastos, notas fiscais...)")
 
 # -----------------------------
-# Função GPT OpenAI
+# Pergunta
 # -----------------------------
-def chamar_gpt_openai(conteudo, max_retries=3):
-    for attempt in range(max_retries):
+pergunta = st.text_input("💬 Sua pergunta:")
+
+# -----------------------------
+# Processamento e fallback gratuito
+# -----------------------------
+if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_conteudo:
+    try:
+        # Preparar conteúdo para IA
+        if df is not None:
+            resumo = {
+                "tipo_conteudo": tipo_conteudo,
+                "colunas": list(df.columns),
+                "amostra": df.head(10).to_dict(orient="records")
+            }
+            conteudo = f"Resumo da tabela:\n{resumo}\nPergunta: {pergunta}"
+        else:
+            conteudo = f"Texto detectado:\n{texto_extraido}\nPergunta: {pergunta}"
+
+        prompt_system = (
+            "Você é um assistente especialista em análise de dados financeiros, planilhas, PDFs e imagens em português. "
+            "Responda com clareza, apenas 'Detalhes adicionais'. "
+            "Se não souber, diga 'Não encontrado'."
+        )
+
+        # Tentar OpenAI
         try:
             resposta = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": (
-                        "Você é um assistente especialista em análise de planilhas, PDFs e textos financeiros em português. "
-                        "Responda com clareza e detalhe todos os dados encontrados. "
-                        "Se não encontrar algo, diga 'Não encontrado'."
-                    )},
+                    {"role": "system", "content": prompt_system},
                     {"role": "user", "content": conteudo}
                 ]
             )
-            return resposta.choices[0].message.content.strip()
+            resposta_final = resposta.choices[0].message.content.strip()
         except Exception as e:
-            if any(x in str(e) for x in ["RateLimit", "quota", "insufficient_quota"]):
-                if attempt < max_retries - 1:
-                    st.warning("⚠️ Limite da API ou cota atingido. Tentando novamente em 5s...")
-                    time.sleep(5)
-                else:
-                    raise e
-            else:
-                raise e
-
-# -----------------------------
-# Função GPT gratuita (Hugging Face)
-# -----------------------------
-def chamar_gpt_gratuito(conteudo):
-    HF_TOKEN = st.secrets.get("HF_TOKEN")  # Hugging Face token no secrets
-    API_URL = "https://api-inference.huggingface.co/models/bigscience/bloom-560m"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    payload = {"inputs": conteudo, "parameters": {"max_new_tokens": 300}}
-    try:
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        output = response.json()
-        if isinstance(output, list) and "generated_text" in output[0]:
-            return output[0]["generated_text"]
-        else:
-            return str(output)
-    except Exception as e:
-        return f"[Erro na IA gratuita]: {e}"
-
-# -----------------------------
-# Processamento da pergunta
-# -----------------------------
-if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_planilha:
-    try:
-        if df is not None:
-            conteudo = f"Planilha tipo: {tipo_planilha}\nColunas: {list(df.columns)}\nAmostra: {df.head(10).to_dict(orient='records')}\nPergunta: {pergunta}"
-            try:
-                resposta_final = chamar_gpt_openai(conteudo)
-            except:
-                st.warning("⚠️ OpenAI falhou, usando IA gratuita...")
-                resposta_final = chamar_gpt_gratuito(conteudo)
-        else:
-            partes = dividir_texto(texto_extraido)
-            respostas = []
-            for p in partes:
-                try:
-                    respostas.append(chamar_gpt_openai(f"Texto:\n{p}\nPergunta: {pergunta}"))
-                except:
-                    st.warning("⚠️ OpenAI falhou, usando IA gratuita...")
-                    respostas.append(chamar_gpt_gratuito(f"Texto:\n{p}\nPergunta: {pergunta}"))
-            resposta_final = "\n\n".join(respostas)
+            st.warning(f"⚠️ Falha na OpenAI: {e}\nUsando fallback gratuito.")
+            # -----------------------------
+            # Fallback gratuito usando modelo local ou GPT4Free
+            # -----------------------------
+            from transformers import pipeline
+            generator = pipeline("text-generation", model="google/flan-t5-small")
+            resposta_final = generator(f"{conteudo}", max_length=500)[0]["generated_text"]
 
         st.subheader("✅ Resposta detalhada:")
         st.write(resposta_final)
         st.session_state["historico"].append({"pergunta": pergunta, "resposta": resposta_final})
 
     except Exception as e:
-        st.error(f"Erro geral: {e}")
+        st.error(f"Erro: {e}")
 
 # -----------------------------
 # Histórico
