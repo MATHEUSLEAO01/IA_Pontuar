@@ -1,9 +1,8 @@
-streamlit==1.50.0
+streamlit
 pandas
 openai
-matplotlib
-pdfplumber
-pytesseract
-Pillow
-camelot-py[cv]
 PyPDF2
+pdfplumber
+camelot-py[cv]
+Pillow
+requests
