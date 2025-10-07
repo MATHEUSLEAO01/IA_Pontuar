@@ -5,15 +5,15 @@ import pdfplumber
 from PIL import Image
 import pytesseract
 import camelot
-from transformers import pipeline
 import re
+from transformers import pipeline
 
 # -----------------------------
 # Inicialização
 # -----------------------------
-st.set_page_config(page_title="IA Leitora de Planilhas Avançada", layout="wide")
-st.title("📊 IA Leitora de Planilhas Avançada - Pontuar Tech")
-st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Informe o tipo → 3️⃣ Faça uma pergunta → 4️⃣ Veja a resposta!")
+st.set_page_config(page_title="IA Leitora de Estoque Avançada", layout="wide")
+st.title("📊 IA Leitora de Estoque Avançada - Pontuar Tech")
+st.markdown("1️⃣ Envie planilha, PDF ou imagem → 2️⃣ Faça uma pergunta sobre itens ou valores → 3️⃣ Veja a resposta!")
 
 # OpenAI
 client = OpenAI(api_key=st.secrets["general"]["OPENAI_API_KEY"])
@@ -64,12 +64,31 @@ def extrair_texto_imagem(file):
     imagem = Image.open(file)
     return pytesseract.image_to_string(imagem, lang="por")
 
-def formatar_valores_resposta(texto):
-    # Remove múltiplos espaços e quebras de linha
+def gerar_resposta_hf(conteudo):
+    try:
+        if len(conteudo) > 1000:
+            conteudo = conteudo[-1000:]
+        saida = hf_pipeline(f"Responda detalhadamente: {conteudo}", max_new_tokens=256)
+        return saida[0]["generated_text"]
+    except:
+        return "Não foi possível gerar resposta gratuita."
+
+def extrair_valores_itens(texto):
+    """
+    Limpa o texto e extrai todos os produtos e valores monetários de forma legível.
+    Exemplo de saída: "Produto X → R$ 10,85"
+    """
     texto = re.sub(r'\s+', ' ', texto)
-    # Normaliza valores monetários
-    texto = re.sub(r'R?\s?([\d]+,[\d]{2})', r'R$ \1', texto)
-    return texto.strip()
+    partes = re.split(r'(R\s?\d+,\d{2})', texto)
+    resultado = []
+    for i in range(1, len(partes), 2):
+        valor = partes[i].strip()
+        descricao = partes[i-1].strip()
+        if descricao:
+            resultado.append(f"{descricao} → R$ {valor.replace('R','').strip()}")
+    if not resultado:
+        return "Não encontrado"
+    return "\n".join(resultado)
 
 # -----------------------------
 # Processamento de arquivo
@@ -98,43 +117,23 @@ if uploaded_file:
         st.stop()
 
 # -----------------------------
-# Tipo de conteúdo
-# -----------------------------
-tipo_planilha = st.text_input("🗂 Qual o tipo de conteúdo? (ex.: vendas, gastos, notas fiscais...)")
-
-# -----------------------------
 # Caixa de pergunta
 # -----------------------------
-pergunta = st.text_input("💬 Sua pergunta:")
+pergunta = st.text_input("💬 Sua pergunta sobre itens ou valores:")
 
 # -----------------------------
-# Função para gerar resposta HF
-# -----------------------------
-def gerar_resposta_hf(conteudo):
-    try:
-        if len(conteudo) > 1000:  # limitar para não travar o modelo
-            conteudo = conteudo[-1000:]
-        saida = hf_pipeline(f"Responda detalhadamente: {conteudo}", max_new_tokens=256)
-        return saida[0]["generated_text"]
-    except:
-        return "Não foi possível gerar resposta gratuita."
-
-# -----------------------------
-# Botão para limpar histórico
+# Botão limpar histórico
 # -----------------------------
 if st.button("🗑 Limpar histórico"):
     st.session_state["historico"] = []
-    st.success("Histórico limpo!")
 
 # -----------------------------
 # Processamento
 # -----------------------------
-if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_planilha:
+if st.button("🔍 Perguntar") and (df is not None or texto_extraido):
     try:
-        # Se for planilha, analisar colunas
         if df is not None:
             resumo = {
-                "tipo_planilha": tipo_planilha,
                 "colunas": list(df.columns),
                 "amostra": df.head(10).to_dict(orient="records"),
             }
@@ -143,8 +142,8 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_p
             conteudo = f"Texto detectado:\n{texto_extraido}\nPergunta: {pergunta}"
 
         prompt_system = (
-            "Você é um assistente especialista em análise de planilhas, PDFs e textos financeiros em português. "
-            "Responda detalhadamente. Se não houver informação, diga 'Não encontrado'."
+            "Você é um assistente especialista em análise de planilhas, PDFs e textos em português. "
+            "Responda detalhadamente e de forma legível. Se a pergunta envolver valores, organize os produtos e preços claramente."
         )
 
         # Tenta OpenAI GPT-4o-mini
@@ -158,16 +157,16 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_p
             )
             texto_completo = resposta.choices[0].message.content.strip()
         except Exception:
-            # Se falhar, usa Hugging Face
             texto_completo = gerar_resposta_hf(conteudo)
 
-        # Formata valores para exibição legível
-        texto_completo = formatar_valores_resposta(texto_completo)
+        # Se a pergunta for sobre valores, limpa e deixa legível
+        if any(palavra in pergunta.lower() for palavra in ["valor", "preço", "quanto"]):
+            texto_completo = extrair_valores_itens(texto_completo)
 
         st.subheader("✅ Resposta Detalhada:")
-        st.write(texto_completo)
+        st.text(texto_completo)
 
-        # Limita histórico a 3 perguntas recentes
+        # Histórico limitado a 3 entradas
         st.session_state["historico"].append({"pergunta": pergunta, "resposta": texto_completo})
         if len(st.session_state["historico"]) > 3:
             st.session_state["historico"] = st.session_state["historico"][-3:]
@@ -181,4 +180,4 @@ if st.button("🔍 Perguntar") and (df is not None or texto_extraido) and tipo_p
 if st.session_state["historico"]:
     st.subheader("📜 Histórico de perguntas recentes")
     for h in reversed(st.session_state["historico"]):
-        st.markdown(f"**Pergunta:** {h['pergunta']}  \n**Resposta:** {h['resposta']}")
+        st.markdown(f"**Pergunta:** {h['pergunta']}  \n**Resposta:**\n{h['resposta']}")
