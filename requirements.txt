@@ -5,3 +5,4 @@ matplotlib
 pdfplumber
 pytesseract
 pillow
+camelot-py[cv]
