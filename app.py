@@ -1,4 +1,6 @@
 import streamlit as st
+from google.cloud import vision
+from google.oauth2 import service_account
 from PIL import Image
 import pytesseract
 import re
@@ -6,14 +8,26 @@ import pandas as pd
 import numpy as np
 import cv2
 from fuzzywuzzy import fuzz, process
-from google.cloud import vision
 
-# Inicializa cliente Google Vision
-client = vision.ImageAnnotatorClient()
+# ---------------------------------------------------------
+# CONFIGURAÇÃO GOOGLE VISION
+# ---------------------------------------------------------
+@st.cache_resource
+def load_google_vision_client():
+    try:
+        credentials = service_account.Credentials.from_service_account_info(
+            st.secrets["google_vision"]
+        )
+        return vision.ImageAnnotatorClient(credentials=credentials)
+    except Exception as e:
+        st.warning("⚠️ Falha ao carregar Google Vision, usando fallback Tesseract.")
+        return None
 
-# ----------------------------
-# Pré-processamento da imagem
-# ----------------------------
+vision_client = load_google_vision_client()
+
+# ---------------------------------------------------------
+# PRÉ-PROCESSAMENTO DE IMAGEM
+# ---------------------------------------------------------
 def pre_processar_imagem(img_file):
     img = Image.open(img_file).convert("RGB")
     img_cv = np.array(img)
@@ -25,34 +39,31 @@ def pre_processar_imagem(img_file):
     )
     return thresh
 
-# ----------------------------
-# OCR local
-# ----------------------------
-def extrair_texto_ocr_local(img_cv):
-    texto = pytesseract.image_to_string(img_cv, lang="por")
-    texto = re.sub(r"\s+", " ", texto)
-    texto = re.sub(r"R\s*\$", "R$", texto)
-    return texto
+# ---------------------------------------------------------
+# OCR GOOGLE VISION + TESSERACT
+# ---------------------------------------------------------
+def extrair_texto_google_vision(image_file):
+    try:
+        content = image_file.read()
+        image = vision.Image(content=content)
+        response = vision_client.text_detection(image=image)
+        texts = response.text_annotations
+        if texts:
+            return texts[0].description
+        else:
+            return ""
+    except Exception as e:
+        st.warning("⚠️ Google Vision falhou. Usando Tesseract como alternativa.")
+        image_file.seek(0)
+        img_cv = pre_processar_imagem(image_file)
+        return pytesseract.image_to_string(img_cv, lang="por")
 
-# ----------------------------
-# OCR Google Vision
-# ----------------------------
-def extrair_texto_google_vision(img_file):
-    img = Image.open(img_file).convert("RGB")
-    buffered = np.array(img)
-    _, encoded_image = cv2.imencode('.png', buffered)
-    content = encoded_image.tobytes()
-    image = vision.Image(content=content)
-    response = client.text_detection(image=image)
-    texto = response.text_annotations[0].description if response.text_annotations else ""
-    texto = re.sub(r"\s+", " ", texto)
-    texto = re.sub(r"R\s*\$", "R$", texto)
-    return texto
-
-# ----------------------------
-# Extrair valores monetários
-# ----------------------------
+# ---------------------------------------------------------
+# EXTRAIR VALORES MONETÁRIOS
+# ---------------------------------------------------------
 def extrair_valores(texto):
+    texto = re.sub(r"\s+", " ", texto)
+    texto = re.sub(r"R\s*\$", "R$", texto)
     valores = re.findall(r'R\$\s?\d{1,3}(?:\.\d{3})*,\d{2}|\d{1,3}(?:\.\d{3})*,\d{2}', texto)
     valores = [v.replace(" ", "").replace("R$", "R$ ") for v in valores]
     final = []
@@ -61,9 +72,9 @@ def extrair_valores(texto):
             final.append(v)
     return final
 
-# ----------------------------
-# Histórico
-# ----------------------------
+# ---------------------------------------------------------
+# HISTÓRICO DE PERGUNTAS
+# ---------------------------------------------------------
 if "historico" not in st.session_state:
     st.session_state["historico"] = []
 
@@ -72,38 +83,36 @@ def adicionar_historico(pergunta, resposta):
     if len(st.session_state["historico"]) > 5:
         st.session_state["historico"] = st.session_state["historico"][-5:]
 
-# ----------------------------
-# Layout Streamlit
-# ----------------------------
-st.title("📊 IA Leitora de Planilhas e Imagens Avançada (Híbrido)")
-uploaded_file = st.file_uploader("📂 Envie planilha, PDF ou imagem", type=["xlsx", "csv", "png", "jpg", "jpeg", "pdf"])
-pergunta = st.text_input("💬 Faça sua pergunta (ex: valor do frango inteiro)")
+# ---------------------------------------------------------
+# INTERFACE STREAMLIT
+# ---------------------------------------------------------
+st.set_page_config(page_title="IA Leitora Pontuar", page_icon="📊")
+st.title("📊 IA Leitora de Planilhas e Imagens Avançada - Pontuar Tech")
+
+uploaded_file = st.file_uploader(
+    "📂 Envie planilha, PDF ou imagem",
+    type=["xlsx", "csv", "png", "jpg", "jpeg", "pdf"]
+)
+
+pergunta = st.text_input("💬 Faça sua pergunta (ex: valor do frango inteiro em GO)")
 
 if st.button("🔍 Consultar") and uploaded_file and pergunta:
     resposta = ""
 
-    # --- Se for imagem ---
+    # -------------------- IMAGEM --------------------
     if uploaded_file.type in ["image/png", "image/jpeg", "image/jpg"]:
-        try:
-            # 1️⃣ OCR local
-            img_cv = pre_processar_imagem(uploaded_file)
-            texto = extrair_texto_ocr_local(img_cv)
-            valores = extrair_valores(texto)
+        texto = extrair_texto_google_vision(uploaded_file)
+        valores = extrair_valores(texto)
+        if valores:
+            resposta = f"💰 Valores encontrados: {', '.join(valores)}"
+        else:
+            resposta = "❌ Nenhum valor encontrado para este item."
 
-            # 2️⃣ Se OCR local não confiável, usa Google Vision
-            if len(valores) < 2:  # critério de confiabilidade
-                texto = extrair_texto_google_vision(uploaded_file)
-                valores = extrair_valores(texto)
-
-            if valores:
-                resposta = f"💰 Valores encontrados: {', '.join(valores)}"
-            else:
-                resposta = "❌ Nenhum valor encontrado para este item."
-        except Exception as e:
-            resposta = f"❌ Erro ao processar imagem: {e}"
-
-    # --- Se for planilha ---
-    elif uploaded_file.type in ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/csv"]:
+    # -------------------- PLANILHA --------------------
+    elif uploaded_file.type in [
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "text/csv",
+    ]:
         try:
             if uploaded_file.type == "text/csv":
                 df = pd.read_csv(uploaded_file)
@@ -133,18 +142,15 @@ if st.button("🔍 Consultar") and uploaded_file and pergunta:
     adicionar_historico(pergunta, resposta)
     st.success(resposta)
 
-# ----------------------------
-# Histórico
-# ----------------------------
+# ---------------------------------------------------------
+# HISTÓRICO
+# ---------------------------------------------------------
 st.subheader("📜 Histórico das últimas perguntas")
 for item in reversed(st.session_state["historico"]):
     st.write(f"**Pergunta:** {item['pergunta']}")
     st.write(f"**Resposta:** {item['resposta']}")
     st.markdown("---")
 
-# ----------------------------
-# Limpar histórico
-# ----------------------------
 if st.button("🧹 Limpar histórico"):
     st.session_state["historico"] = []
     st.success("✅ Histórico limpo!")
