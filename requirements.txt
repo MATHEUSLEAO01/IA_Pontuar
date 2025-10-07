@@ -1,14 +1,10 @@
 streamlit
-pandas
-openai
-PyPDF2
-pdfplumber
+google-cloud-vision
+google-auth
+pillow
 pytesseract
-Pillow
-camelot-py[cv]
-transformers
-torch
-fuzzywuzzy[speedup]
 opencv-python-headless
-
-pip istall google-cloud-vision
+numpy
+pandas
+fuzzywuzzy
+python-Levenshtein
