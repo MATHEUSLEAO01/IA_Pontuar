@@ -8,3 +8,4 @@ numpy
 pandas
 fuzzywuzzy
 python-Levenshtein
+pdfplumber
